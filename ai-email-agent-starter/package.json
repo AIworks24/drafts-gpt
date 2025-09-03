@@ -1,8 +1,0 @@
-{
-  "name": "ai-email-agent-monorepo",
-  "private": true,
-  "workspaces": [
-    "apps/*",
-    "worker"
-  ]
-}
