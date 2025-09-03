@@ -1,0 +1,25 @@
+create table clients (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  timezone text not null default 'America/New_York',
+  created_at timestamptz default now()
+);
+
+create table m365_users (
+  id uuid primary key default gen_random_uuid(),
+  client_id uuid references clients(id),
+  upn text not null,
+  account_tenant text not null,
+  access_token_encrypted text not null,
+  refresh_token_encrypted text not null,
+  created_at timestamptz default now()
+);
+
+create table drafts (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references m365_users(id),
+  message_id text not null,
+  draft_id text,
+  status text not null default 'pending',
+  created_at timestamptz default now()
+);
