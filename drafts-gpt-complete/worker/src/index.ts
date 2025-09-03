@@ -1,0 +1,5 @@
+import 'dotenv/config';
+import { supabase } from './utils/supabase.js';
+import { generateDraft } from './jobs/generateDraft.js';
+async function main(){console.log('Worker started');while(true){try{const {data:drafts,error}=await supabase.from('drafts').select('*').eq('status','pending').limit(5);if(error)throw error;for(const d of drafts||[]){try{const {data:users}=await supabase.from('m365_users').select('*').limit(1);const token=users?.[0]?.access_token_encrypted;if(!token){console.warn('No token; skipping', d.id);continue;}const prompt='Draft a short, polite acknowledgment reply and promise a follow-up.';const draftMsg=await generateDraft(token,d.message_id,prompt);await supabase.from('drafts').update({draft_id:draftMsg?.id||null,status:'completed'}).eq('id',d.id);}catch(jobErr){console.error('Job failed:',jobErr);await supabase.from('drafts').update({status:'error'}).eq('id',d.id);}}}catch(e){console.error('Loop error:',e);}await new Promise(r=>setTimeout(r,3000));}}
+main().catch(e=>{console.error('Fatal:',e);process.exit(1);});
