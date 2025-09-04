@@ -1,0 +1,1 @@
+export default function Dashboard(){return (<main style={{padding:24,fontFamily:'system-ui'}}><h1>Dashboard</h1><p>Drafts will appear after webhooks + worker run.</p></main>);}

@@ -1,0 +1,1 @@
+export default function DraftPreview(){return(<div style={{border:'1px solid #ddd',padding:16,borderRadius:12}}><h3 style={{marginTop:0}}>Draft Preview</h3><p>No drafts yet.</p></div>);}
