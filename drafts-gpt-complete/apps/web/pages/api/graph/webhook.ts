@@ -1,4 +1,0 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { createClient } from '@supabase/supabase-js';
-const supabase=createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.SUPABASE_SERVICE_ROLE_KEY!);
-export default async function handler(req:NextApiRequest,res:NextApiResponse){if(req.method==='GET'){const t=req.query.validationToken as string;if(t)return res.status(200).send(t);return res.status(400).send('missing token');}if(req.method==='POST'){res.status(202).end();try{const notes=(req.body?.value||[]) as any[];for(const n of notes){if(n.resource?.includes('/messages/')&&n.resourceData?.id){await supabase.from('drafts').insert({message_id:n.resourceData.id,status:'pending'});}}}catch(e){console.error('webhook error',e);}return;}res.setHeader('Allow','GET,POST');res.status(405).end();}

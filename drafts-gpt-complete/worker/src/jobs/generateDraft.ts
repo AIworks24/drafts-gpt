@@ -1,3 +1,0 @@
-import { openai } from '../utils/openai.js';
-import { createReplyDraft, updateDraftBody } from '../utils/graph.js';
-export async function generateDraft(accessToken:string,messageId:string,prompt:string){const completion=await openai.chat.completions.create({model:'gpt-4o-mini',messages:[{role:'system',content:'You draft concise, professional email replies.'},{role:'user',content:prompt}]});const html=completion.choices?.[0]?.message?.content||'<p>Thanks for reaching out. We will follow up shortly.</p>';const draft=await createReplyDraft(accessToken,messageId);await updateDraftBody(accessToken,draft.id,html);return draft;}

@@ -1,8 +1,0 @@
-{
-  "name": "drafts-gpt",
-  "private": true,
-  "workspaces": [
-    "apps/*",
-    "worker"
-  ]
-}
