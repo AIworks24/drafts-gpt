@@ -2,3 +2,5 @@
 # allow GitHub workflows
 !.github/
 !.github/workflows/
+node_modules
+package-lock.json
