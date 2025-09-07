@@ -13,13 +13,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Supabase CLI (Docker)
+      - name: Use Supabase CLI (Docker via GHCR)
         uses: addnab/docker-run-action@v3
         with:
-          image: supabase/cli:latest
+          image: ghcr.io/supabase/cli:latest
+          # NOTE: add PAT via env so 'supabase link' is non-interactive
           options: >
-            -v ${{ github.workspace }}:/workspace
-            -w /workspace
+            -e SUPABASE_ACCESS_TOKEN=${{ secrets.SUPABASE_ACCESS_TOKEN }}
+            -v ${{ github.workspace }}:/github/workspace
+            -w /github/workspace
           run: |
             supabase --version
             supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
