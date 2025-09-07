@@ -1,0 +1,4 @@
+
+# allow GitHub workflows
+!.github/
+!.github/workflows/
