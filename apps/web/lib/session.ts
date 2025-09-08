@@ -1,38 +1,45 @@
+// apps/web/lib/session.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { createHash, randomBytes } from 'crypto';
 import { serialize, parse } from 'cookie';
+import { createHmac } from 'crypto';
 
 const COOKIE = 'dgpt_sess';
 const SECRET = process.env.SESSION_SECRET!;
-if (!SECRET || SECRET.length < 32) throw new Error('SESSION_SECRET too short');
 
-export type Sess = { userId: string };
+type SessionData = { upn?: string; account?: any };
 
-function sign(payload: string) {
-  return createHash('sha256').update(SECRET + payload).digest('hex');
+function sign(v: string) {
+  return createHmac('sha256', SECRET).update(v).digest('hex');
 }
 
-export function setSession(res: NextApiResponse, sess: Sess) {
-  const payload = JSON.stringify(sess);
-  const sig = sign(payload);
-  res.setHeader('Set-Cookie', serialize(COOKIE, Buffer.from(payload).toString('base64') + '.' + sig, {
-    httpOnly: true, sameSite: 'lax', path: '/', secure: true, maxAge: 60 * 60 * 24 * 30
-  }));
+export function getSession(req: NextApiRequest): SessionData {
+  const raw = req.headers.cookie ? parse(req.headers.cookie)[COOKIE] : undefined;
+  if (!raw) return {};
+  try {
+    const [payloadB64, sig] = raw.split('.');
+    if (sign(payloadB64) !== sig) return {};
+    const json = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
 }
 
-export function getSession(req: NextApiRequest): Sess | null {
-  const raw = parse(req.headers.cookie || '')[COOKIE];
-  if (!raw) return null;
-  const [b64, sig] = raw.split('.');
-  const payload = Buffer.from(b64 || '', 'base64').toString();
-  if (sign(payload) !== sig) return null;
-  return JSON.parse(payload);
+export function setSession(res: NextApiResponse, data: SessionData) {
+  const payloadB64 = Buffer.from(JSON.stringify(data)).toString('base64url');
+  const val = `${payloadB64}.${sign(payloadB64)}`;
+  res.setHeader(
+    'Set-Cookie',
+    serialize(COOKIE, val, {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: true,
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+    })
+  );
 }
 
 export function clearSession(res: NextApiResponse) {
   res.setHeader('Set-Cookie', serialize(COOKIE, '', { path: '/', maxAge: 0 }));
-}
-
-export function newState(): string {
-  return randomBytes(16).toString('hex');
 }

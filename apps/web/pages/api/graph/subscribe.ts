@@ -1,51 +1,52 @@
+// apps/web/pages/api/graph/subscribe.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getSession } from '@/lib/session';
-import { supabase } from '@/lib/supabase';
+import axios from 'axios';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
-import { randomBytes } from 'crypto';
+import { supabase } from '@/lib/supabase';
+import { getSession } from '@/lib/session';
+
+const GRAPH = process.env.GRAPH_BASE || 'https://graph.microsoft.com/v1.0';
+const WEBHOOK_URL = `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  if (req.method !== 'POST') return res.status(405).end();
 
   const sess = getSession(req);
-  if (!sess) return res.status(401).json({ error: 'Not signed in' });
+  if (!sess.upn) return res.status(401).json({ error: 'Not signed in' });
 
-  const { data: user } = await supabase.from('app_users').select().eq('id', sess.userId).single();
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  // find cached account + token
+  const accounts = await msalApp.getTokenCache().getAllAccounts();
+  const account = accounts.find(a => a.username === sess.upn) || accounts[0];
+  if (!account) return res.status(401).json({ error: 'No account in cache' });
+  const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
+  if (!token?.accessToken) return res.status(401).json({ error: 'No token' });
 
-  // hydrate MSAL cache
-  const { data: cacheRow } = await supabase.from('msal_token_cache').select().eq('user_id', user.id).single();
-  if (!cacheRow) return res.status(400).json({ error: 'No token cache' });
-  msalApp.getTokenCache().deserialize(JSON.stringify(cacheRow.cache_json));
+  const clientState = Math.random().toString(36).slice(2);
+  const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour (renew later)
 
-  const token = await msalApp.acquireTokenSilent({ account: (await msalApp.getTokenCache().getAllAccounts())[0], scopes: MS_SCOPES });
+  try {
+    const { data: sub } = await axios.post(
+      `${GRAPH}/subscriptions`,
+      {
+        changeType: 'created',
+        resource: "/me/mailFolders('Inbox')/messages",
+        notificationUrl: WEBHOOK_URL,
+        clientState,
+        expirationDateTime: expiration,
+        latestSupportedTlsVersion: 'v1_2',
+      },
+      { headers: { Authorization: `Bearer ${token.accessToken}` } }
+    );
 
-  const clientState = randomBytes(12).toString('hex');
-  const expiration = new Date(Date.now() + 60 * 60 * 24 * 1000 - 5 * 60 * 1000); // ~24h minus 5m
+    try {
+      await supabase.from('graph_subscriptions').upsert(
+        { id: sub.id, client_state: clientState, user_id: sess.upn } as any
+      );
+    } catch { /* ignore */ }
 
-  const r = await fetch('https://graph.microsoft.com/v1.0/subscriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token!.accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      changeType: 'created,updated',
-      notificationUrl: `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`,
-      resource: '/me/messages',
-      clientState,
-      expirationDateTime: expiration.toISOString()
-    })
-  });
-  if (!r.ok) {
-    return res.status(500).json({ error: 'Subscription failed', detail: await r.text() });
+    res.status(200).json({ ok: true, id: sub.id });
+  } catch (e: any) {
+    console.error('subscribe error', e?.response?.data || e);
+    res.status(500).json({ error: e?.response?.data || e.message });
   }
-  const sub = await r.json();
-
-  await supabase.from('graph_subscriptions').upsert({
-    id: sub.id,
-    user_id: user.id,
-    client_state: clientState,
-    resource: sub.resource,
-    expiration_time: sub.expirationDateTime
-  });
-
-  res.status(200).json({ ok: true, subscriptionId: sub.id, expiration: sub.expirationDateTime });
 }
