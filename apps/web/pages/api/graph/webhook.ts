@@ -1,3 +1,4 @@
+// apps/web/pages/api/graph/webhook.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '@/lib/supabase';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
@@ -17,53 +18,73 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method === 'GET') return handleValidation(req, res);
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-  // Immediately ack
+  // Immediately ack so Graph doesn't retry
   res.status(202).json({ ok: true });
 
   try {
-    const payload = req.body;
-    const events: any[] = payload?.value || [];
+    const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
     for (const n of events) {
       if (n.lifecycleEvent === 'reauthorizationRequired') continue;
 
-      // verify clientState, find user
-      const { data: sub } = await supabase.from('graph_subscriptions').select().eq('id', n.subscriptionId).single();
+      // verify clientState, find the subscription row
+      const { data: sub } = await supabase
+        .from('graph_subscriptions')
+        .select('*')
+        .eq('id', n.subscriptionId)
+        .single();
       if (!sub) continue;
       if (sub.client_state !== n.clientState) continue;
 
-      const { data: cacheRow } = await supabase.from('msal_token_cache').select().eq('user_id', sub.user_id).single();
+      // hydrate MSAL cache for this user
+      const { data: cacheRow } = await supabase
+        .from('msal_token_cache')
+        .select('*')
+        .eq('user_id', sub.user_id)
+        .single();
       if (!cacheRow) continue;
 
-      // hydrate MSAL cache for this user
-      msalApp.getTokenCache().deserialize(JSON.stringify(cacheRow.cache_json));
-      const account = (await msalApp.getTokenCache().getAllAccounts())[0];
+      const cache = msalApp.getTokenCache();
+      cache.deserialize(JSON.stringify(cacheRow.cache_json));
+      const [account] = await cache.getAllAccounts();
       if (!account) continue;
 
       const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
       if (!token?.accessToken) continue;
 
-      // fetch message
-      const messageId = n.resourceData?.id;
+      const messageId: string | undefined = n.resourceData?.id;
       if (!messageId) continue;
 
+      // Fetch the full message
       const msg = await gGet(token.accessToken, `/me/messages/${messageId}`);
 
-      // very small summary for LLM
-      const summary = [
-        `Subject: ${msg.subject || ''}`,
-        `From: ${msg.from?.emailAddress?.address || ''}`,
-        `Preview: ${msg.bodyPreview || ''}`
-      ].join('\n');
+      // Extract subject and a plain-text body we can feed to the model
+      const subject: string = msg?.subject ?? '';
+      let bodyText = '';
+      if (msg?.body?.content) {
+        const raw = String(msg.body.content);
+        if (msg.body.contentType === 'html') {
+          bodyText = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); // strip HTML tags
+        } else {
+          bodyText = raw;
+        }
+      }
+      if (!bodyText) bodyText = String(msg?.bodyPreview ?? '');
 
-      // generate HTML body
-      const html = await draftReply({ threadSummary: summary });
+      // Draft the reply (keep it simple; tone can be wired to your client config later)
+      const ai = await draftReply({
+        originalPlain: bodyText,
+        subject,
+        tone: 'neutral',
+      });
 
-      // create reply draft & patch body
+      const html: string = ai?.bodyHtml ?? '<p>Thanks for your email.</p>';
+
+      // Create a reply draft and patch the body (leave as Draft)
       const draft = await createReplyDraft(token.accessToken, messageId, false);
       await updateDraftBody(token.accessToken, draft.id, html);
     }
   } catch (e) {
-    // swallow to avoid retries storm; use logging in real prod
+    // swallow to avoid retries storms; add logging/alerts in prod
     console.error('webhook error', e);
   }
 }
