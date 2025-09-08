@@ -1,7 +1,7 @@
 // apps/web/lib/session.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { serialize, parse } from 'cookie';
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 
 const COOKIE = 'dgpt_sess';
 const SECRET = process.env.SESSION_SECRET!;
@@ -23,6 +23,10 @@ export function getSession(req: NextApiRequest): SessionData {
   } catch {
     return {};
   }
+}
+
+export function newState(): string {
+  return randomBytes(16).toString('hex');
 }
 
 export function setSession(res: NextApiResponse, data: SessionData) {
