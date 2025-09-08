@@ -21,7 +21,7 @@ export type DraftReplyOutput = {
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/** Core LLM helper used by API routes. */
+/** Core helper: returns { subject, bodyHtml } */
 export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutput> {
   const {
     originalPlain = "",
@@ -90,16 +90,20 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
 }
 
 /**
- * Compatibility wrapper used by some routes:
- * Accepts a looser, “kitchen sink” object (client config, templates, toneProfile, etc.),
- * picks what it needs, then calls `draftReply`.
+ * Compatibility wrapper for routes that expect:
+ *   { json: { subject, body_html }, tokens }
+ * We reuse draftReply() and reshape the result.
  */
-export async function draftReplyWithTone(input: any): Promise<DraftReplyOutput> {
-  // Try to pick the most specific text fields the route may pass
+export async function draftReplyWithTone(input: any): Promise<{
+  json: { subject: string | null; body_html: string };
+  tokens: number;
+}> {
+  // Normalize inputs that might come from your route
   const originalPlain =
     input?.originalPlain ??
     input?.bodyPlain ??
     input?.latestPlain ??
+    input?.email?.bodyText ??
     input?.messagePlain ??
     "";
 
@@ -115,8 +119,6 @@ export async function draftReplyWithTone(input: any): Promise<DraftReplyOutput> 
     input?.client?.name ??
     "";
 
-  // If a single template string is provided, use it.
-  // Otherwise, try to pick from an array by intent/category, else first item.
   let template = input?.template ?? "";
   const intent = input?.intent ?? input?.classification ?? "";
   if (!template && Array.isArray(input?.templates) && input.templates.length) {
@@ -125,7 +127,12 @@ export async function draftReplyWithTone(input: any): Promise<DraftReplyOutput> 
         (t.intent && t.intent === intent) ||
         (t.category && t.category === intent)
     );
-    template = byIntent?.body || byIntent?.text || input.templates[0]?.body || input.templates[0]?.text || "";
+    template =
+      byIntent?.body ||
+      byIntent?.text ||
+      input.templates[0]?.body ||
+      input.templates[0]?.text ||
+      "";
   }
 
   const instructions =
@@ -134,27 +141,35 @@ export async function draftReplyWithTone(input: any): Promise<DraftReplyOutput> 
     input?.client?.policies ??
     "";
 
-  const threadSummary =
-    input?.threadSummary ?? input?.summary ?? "";
+  const threadSummary = input?.threadSummary ?? input?.summary ?? "";
 
-  const subject =
-    typeof input?.subject === "string" ? input.subject : null;
+  const subjectIn =
+    typeof input?.subject === "string"
+      ? input.subject
+      : input?.email?.subject ?? null;
 
-  const locale =
-    input?.locale ??
-    input?.client?.locale ??
-    "en-US";
+  const locale = input?.locale ?? input?.client?.locale ?? "en-US";
 
-  return draftReply({
+  const out = await draftReply({
     originalPlain,
     threadSummary,
-    subject,
+    subject: subjectIn,
     tone,
     companyName,
     template,
     instructions,
     locale,
   });
+
+  // VERY rough token estimate (char/4). Good enough for reporting UI.
+  const approxTokens = Math.ceil(
+    ((out.bodyHtml?.length || 0) + (out.subject?.length || 0)) / 4
+  );
+
+  return {
+    json: { subject: out.subject, body_html: out.bodyHtml },
+    tokens: approxTokens,
+  };
 }
 
 /** tiny HTML escaper for the fallback path */
