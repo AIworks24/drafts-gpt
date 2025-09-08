@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { msalApp, MS_SCOPES } from "@/lib/auth";
+import { msalApp, MS_SCOPES } from "@/lib/msal";
 import { supabase } from "@/lib/supabase";
 
 // /api/auth/microsoft?action=login  => starts auth
