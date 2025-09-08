@@ -1,4 +1,3 @@
-// apps/web/pages/api/graph/draft.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { supabase } from "@/lib/supabase";
 import { msalApp, MS_SCOPES } from "@/lib/msal";
@@ -9,7 +8,6 @@ import { getClientByUser, getClientTemplates, recordUsage } from "@/lib/config";
 /**
  * POST /api/graph/draft
  * Body: { user_id: string, messageId: string, replyAll?: boolean, suggestTimes?: boolean, tz?: string }
- * Creates a reply draft for the given message and patches AI-generated HTML.
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
@@ -20,7 +18,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: "Missing user_id or messageId" });
     }
 
-    // 1) Load MSAL cache for this user & get access token
+    // 1) get access token
     const { data: cacheRow, error: cacheErr } = await supabase
       .from("msal_token_cache")
       .select("*")
@@ -36,12 +34,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
     if (!token?.accessToken) return res.status(401).json({ error: "Failed to acquire token" });
 
-    // 2) Fetch the source message
+    // 2) source message
     const msg = await getMessage(token.accessToken, messageId);
     const subject: string = msg?.subject ?? "";
     const fromAddr: string = msg?.from?.emailAddress?.address ?? "";
 
-    // Normalize body text for LLM (strip HTML if needed)
     let bodyText = "";
     const raw = String(msg?.body?.content ?? "");
     if ((msg?.body?.contentType || "").toLowerCase() === "html") {
@@ -50,32 +47,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       bodyText = raw || String(msg?.bodyPreview ?? "");
     }
 
-    // 3) Load client config/templates (your existing helpers)
+    // 3) client config & template
     const client = await getClientByUser(user_id);
     const templates = await getClientTemplates(client?.id);
-
-    // Pick first matching template or blank
     const templateBody = templates?.[0]?.body ?? "";
 
-    // 4) Optionally propose meeting times (uses Graph findMeetingTimes)
+    // 4) optional meeting times  ❗ FIX: call with (accessToken, opts)
     let slotLines: string[] = [];
     if (suggestTimes) {
       const now = new Date();
       const in7 = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-      slotLines = await findMeetingTimes({
-        accessToken: token.accessToken,
-        opts: {
-          attendee: fromAddr,         // propose times back to the sender
-          tz,
-          windowStartISO: now.toISOString(),
-          windowEndISO: in7.toISOString(),
-          durationISO: "PT30M",
-          maxCandidates: 5,
-        },
+      slotLines = await findMeetingTimes(token.accessToken, {
+        attendee: fromAddr,
+        tz,
+        windowStartISO: now.toISOString(),
+        windowEndISO: in7.toISOString(),
+        durationISO: "PT30M",
+        maxCandidates: 5,
       });
     }
 
-    // 5) Draft the reply with your helper (tone, template, policies)
+    // 5) AI reply
     const ai = await draftReply({
       originalPlain: bodyText,
       subject,
@@ -85,21 +77,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       instructions: client?.policies ?? "",
     });
 
-    // If we have proposed slots, append a simple availability block
     let html = ai.bodyHtml || "<p>Thanks for your email.</p>";
     if (slotLines.length) {
       const list = slotLines.map((s) => `<li>${s}</li>`).join("");
       html += `<p>Here are some times that work for us:</p><ul>${list}</ul>`;
     }
 
-    // 6) Create a Graph reply draft and patch the body
+    // 6) create/patch draft
     const draft = await createReplyDraft(token.accessToken, messageId, replyAll);
     await updateDraftBody(token.accessToken, draft.id, html);
 
-    // 7) Record usage with the new token shape
+    // 7) usage log  ❗ FIX: use fields your helper accepts
     const t = ai.tokens ?? { prompt: 0, completion: 0, total: 0 };
     await recordUsage({
-      user_id,
+      client_id: client?.id,
+      mailbox_upn: fromAddr,
       event_type: "draft",
       meta: { subject, messageId, slotsCount: slotLines.length },
       tokens_prompt: t.prompt,
