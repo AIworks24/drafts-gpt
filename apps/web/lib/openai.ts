@@ -1,80 +1,117 @@
 // apps/web/lib/openai.ts
 import OpenAI from "openai";
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-type DraftArgs = {
-  client: any; // row from clients
-  templates: Array<{ title: string; category: string; body_md: string }>;
-  email: { subject: string; bodyText: string; from?: string };
-  scheduling?: { wantScheduling: boolean; slots?: string[] }; // add slots from Graph
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+/** Shape you can pass from your API routes; it's flexible on purpose */
+export type DraftReplyInput = {
+  /** Raw plain-text from the latest inbound email (or whole thread) */
+  originalPlain?: string;
+  /** Short summary of the thread if you already computed it */
+  threadSummary?: string;
+  /** Optional subject hint; function will generate one if null */
+  subject?: string | null;
+  /** Brand / client knobs */
+  tone?: "friendly" | "formal" | "neutral" | "concise" | "warm" | string;
+  companyName?: string;
+  /** Optional canned template text the model can adapt */
+  template?: string;
+  /** Extra guardrails or business rules */
+  instructions?: string;
+  /** Locale hint */
+  locale?: string;
 };
 
-const SYS = `You draft Outlook reply emails for a specific client.
-- Respect brand voice and tone.
-- Be accurate; do not invent facts.
-- If scheduling context is provided, propose the suggested time windows.
-- Keep replies concise, professional, and clearly actionable.`;
+export type DraftReplyOutput = {
+  subject: string | null;
+  bodyHtml: string;
+};
 
-export async function draftReplyWithTone(args: DraftArgs) {
-  const { client, templates, email, scheduling } = args;
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
 
-  const templateBullets =
-    templates?.length
-      ? templates
-          .map((t) => `### ${t.title} (${t.category})\n${t.body_md}`)
-          .join("\n\n")
-      : "No templates provided.";
+/**
+ * draftReply — produce HTML email body (and optional subject) using OpenAI.
+ * Designed to be tolerant of different inputs so your API routes don’t have to match
+ * a rigid schema while you iterate.
+ */
+export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutput> {
+  const {
+    originalPlain = "",
+    threadSummary = "",
+    subject = null,
+    tone = "neutral",
+    companyName = "",
+    template = "",
+    instructions = "",
+    locale = "en-US",
+  } = input;
 
-  const schedulingBlock = scheduling?.wantScheduling
-    ? `\n\nScheduling:\n${(scheduling.slots || []).map((s) => `- ${s}`).join("\n") || "(no slots found)"}`
-    : "";
+  // Build a compact prompt
+  const system = [
+    `You are an assistant that drafts professional email replies.`,
+    `Write in ${tone} tone. Company: ${companyName || "N/A"}. Locale: ${locale}.`,
+    `Follow instructions if present. If insufficient info, be concise and ask for 1 clear next step.`,
+    `Output valid, simple HTML (paragraphs, strong, links). No inline CSS.`,
+  ].join(" ");
 
-  const tone = client?.tone || {};
-  const toneLine = `Persona: ${tone.persona ?? "professional"}, Formality: ${tone.formality ?? "medium"}, Warmth: ${tone.warmth ?? 0.5}, Conciseness: ${tone.conciseness ?? "brief"}`;
+  const user = [
+    template ? `TEMPLATE (optional, adapt as needed):\n${template}\n` : "",
+    instructions ? `POLICY/RULES:\n${instructions}\n` : "",
+    threadSummary ? `THREAD SUMMARY:\n${threadSummary}\n` : "",
+    `LATEST MESSAGE (plain text):\n${originalPlain}\n`,
+    `Return JSON with keys: subject (string|null), body_html (string).`,
+  ].join("\n");
 
-  const biz = client?.business_hours ? JSON.stringify(client.business_hours) : "{}";
+  try {
+    const completion = await client.chat.completions.create({
+      model: MODEL,
+      temperature: 0.4,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      response_format: { type: "json_object" },
+    });
 
-  const prompt = `
-Client Name: ${client?.name}
-Time Zone: ${client?.timezone}
-Business Hours: ${biz}
-Tone: ${toneLine}
+    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // fallback: wrap the model text if it didn't return JSON
+      parsed = { subject, body_html: `<p>${escapeHtml(raw)}</p>` };
+    }
 
-Templates (markdown):
-${templateBullets}
+    const safeSubject =
+      typeof parsed.subject === "string" || parsed.subject === null
+        ? parsed.subject
+        : subject;
 
-Email to reply:
-Subject: ${email.subject}
-From: ${email.from ?? "(unknown)"}
-Body:
-${email.bodyText}
+    const safeBody =
+      typeof parsed.body_html === "string" && parsed.body_html.trim()
+        ? parsed.body_html
+        : `<p>Thank you for your message. We’ll follow up shortly.</p>`;
 
-${schedulingBlock}
-
-Task:
-1) Classify the email intent quickly (scheduling / refund / support / sales / other).
-2) If a matching template exists, adapt it; otherwise build from scratch using brand tone.
-3) If scheduling slots were supplied, offer 2-3 concise options.
-4) Output JSON:
-
-{
-  "subject": "string|null", 
-  "body_html": "<p>...</p>"
+    return { subject: safeSubject ?? null, bodyHtml: safeBody };
+  } catch (err) {
+    // last-resort fallback so your build/routes never crash
+    console.error("draftReply error:", err);
+    return {
+      subject: subject ?? null,
+      bodyHtml:
+        "<p>Thanks for reaching out. We’ve received your message and will get back to you shortly.</p>",
+    };
+  }
 }
-`;
 
-  const resp = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.3,
-    messages: [
-      { role: "system", content: SYS },
-      { role: "user", content: prompt },
-    ],
-    response_format: { type: "json_object" as const },
-  });
-
-  const text = resp.choices[0]?.message?.content || "{}";
-  let json;
-  try { json = JSON.parse(text); } catch { json = { subject: null, body_html: "<p>(error parsing model output)</p>" }; }
-  return { json, tokens: (resp.usage as any) || {} };
+/** tiny HTML escaper for the fallback path */
+function escapeHtml(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
