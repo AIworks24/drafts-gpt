@@ -1,26 +1,31 @@
 {
   "name": "drafts-gpt-web",
   "private": true,
+  "version": "1.0.0",
   "scripts": {
     "dev": "next dev",
-    "build": "next build"
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "node -e \"console.log('postinstall ok')\""
   },
   "dependencies": {
-    "@azure/msal-node": "^2.16.3",
-    "@supabase/supabase-js": "^2.57.2",
-    "@types/cookie": "^1.0.0",
+    "@azure/msal-node": "^2.10.0",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "@supabase/supabase-js": "^2.45.4",
+    "axios": "^1.7.7",
     "cookie": "^0.6.0",
     "next": "14.2.5",
-    "openai": "^4.59.0",
+    "openai": "^4.57.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "server-only": "^0.0.1"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/cookie": "^0.6.0",
     "@types/node": "^20.14.12",
-    "@types/react": "^18.3.24",
-    "@types/react-dom": "^18.3.7",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
     "typescript": "^5.5.4"
   }
 }

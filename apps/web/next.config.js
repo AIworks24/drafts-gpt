@@ -1,9 +1,8 @@
 /** @type {import('next').NextConfig} */
-const path = require('path');
-module.exports = {
-  reactStrictMode: true,
-  webpack: (config) => {
-    config.resolve.alias['@'] = config.resolve.alias['@'] || path.resolve(__dirname);
-    return config;
+const nextConfig = {
+  reactStrictMode: false,
+  experimental: {
+    typedRoutes: false
   }
 };
+module.exports = nextConfig;
