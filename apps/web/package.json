@@ -8,10 +8,13 @@
   "dependencies": {
     "@azure/msal-node": "^2.6.6",
     "@supabase/supabase-js": "^2.46.1",
+    "@types/cookie": "^1.0.0",
+    "cookie": "^1.0.2",
     "next": "14.2.5",
     "openai": "^4.59.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.12",
