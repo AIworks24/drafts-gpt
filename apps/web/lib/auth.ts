@@ -1,11 +1,31 @@
-/**
- * Placeholder for acquiring a Microsoft Graph access token.
- * Replace with your MSAL / cookie session flow as needed.
- */
-export type AccessTokenResult = { accessToken: string };
+// apps/web/lib/auth.ts
+import { ConfidentialClientApplication } from '@azure/msal-node';
 
-export async function requireGraphAccessToken(req: any): Promise<AccessTokenResult> {
-  // In your real app, fetch the user's access token from your session / Supabase / cookies
-  // and return it. For now we throw to avoid accidental usage in prod without wiring.
-  throw new Error('requireGraphAccessToken not implemented. Wire your MSAL/session flow.');
-}
+const tenant = process.env.AZURE_TENANT_ID || 'common';
+const authority = `https://login.microsoftonline.com/${tenant}`;
+
+export const OAUTH_REDIRECT_URI =
+  process.env.AZURE_REDIRECT_URI || process.env.OAUTH_REDIRECT_URI || '';
+
+if (!process.env.AZURE_CLIENT_ID) throw new Error('Missing AZURE_CLIENT_ID');
+if (!process.env.AZURE_CLIENT_SECRET) throw new Error('Missing AZURE_CLIENT_SECRET');
+if (!OAUTH_REDIRECT_URI) throw new Error('Missing AZURE_REDIRECT_URI or OAUTH_REDIRECT_URI');
+
+export const msalApp = new ConfidentialClientApplication({
+  auth: {
+    clientId: process.env.AZURE_CLIENT_ID!,
+    clientSecret: process.env.AZURE_CLIENT_SECRET!,
+    authority,
+  },
+});
+
+// Graph scopes (Authorization Code w/ PKCE or standard code flow)
+export const GRAPH_SCOPES = [
+  'offline_access',
+  'openid',
+  'profile',
+  // use fully-qualified Graph scopes to be explicit
+  'https://graph.microsoft.com/Mail.Read',
+  'https://graph.microsoft.com/Mail.ReadWrite',
+  'https://graph.microsoft.com/Calendars.Read',
+] as const;
