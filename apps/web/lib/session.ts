@@ -1,49 +1,78 @@
 // apps/web/lib/session.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
+import type { IncomingHttpHeaders } from 'http';
 import { serialize, parse } from 'cookie';
-import { createHmac, randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 const COOKIE = 'dgpt_sess';
-const SECRET = process.env.SESSION_SECRET!;
+const SECRET = process.env.SESSION_SECRET || 'dev-secret';
 
-export type SessionData = { upn?: string; account?: any; userId?: string };
+export type SessionData = {
+  userId?: string;
+  state?: string;
+};
 
+// sign/verify a compact cookie payload
 function sign(v: string) {
-  return createHmac('sha256', SECRET).update(v).digest('hex');
+  return createHash('sha256').update(v + SECRET).digest('hex');
 }
-
-export function getSession(req: NextApiRequest): SessionData {
-  const raw = req.headers.cookie ? parse(req.headers.cookie)[COOKIE] : undefined;
-  if (!raw) return {};
+function encode(obj: SessionData) {
+  const json = Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const sig = sign(json);
+  return `${json}.${sig}`;
+}
+function decodeCookie(value: string | undefined): SessionData | null {
+  if (!value) return null;
+  const [json, sig] = value.split('.');
+  if (!json || !sig) return null;
+  if (sign(json) !== sig) return null;
   try {
-    const [payloadB64, sig] = raw.split('.');
-    if (sign(payloadB64) !== sig) return {};
-    const json = Buffer.from(payloadB64, 'base64url').toString('utf8');
-    return JSON.parse(json);
+    return JSON.parse(Buffer.from(json, 'base64url').toString());
   } catch {
-    return {};
+    return null;
   }
 }
 
+// Generate a CSRF-ish state token for the OAuth dance
 export function newState(): string {
   return randomBytes(16).toString('hex');
 }
 
+// Works for both API routes (NextApiRequest) and getServerSideProps (Node req)
+export function getSession(
+  req: NextApiRequest | { headers: IncomingHttpHeaders; cookies?: Record<string, string> }
+): SessionData | null {
+  const cookies =
+    // NextApiRequest has a parsed cookies object
+    (req as any).cookies ??
+    // getServerSideProps gives raw headers; parse them
+    parse((req.headers as any)?.cookie || '');
+  return decodeCookie(cookies[COOKIE]);
+}
+
 export function setSession(res: NextApiResponse, data: SessionData) {
-  const payloadB64 = Buffer.from(JSON.stringify(data)).toString('base64url');
-  const val = `${payloadB64}.${sign(payloadB64)}`;
+  const value = encode(data);
   res.setHeader(
     'Set-Cookie',
-    serialize(COOKIE, val, {
+    serialize(COOKIE, value, {
       path: '/',
       httpOnly: true,
       sameSite: 'lax',
-      secure: true,
-      maxAge: 60 * 60 * 24 * 7, // 7 days
+      maxAge: 60 * 60 * 24 * 30, // 30d
+      secure: process.env.NODE_ENV === 'production',
     })
   );
 }
 
 export function clearSession(res: NextApiResponse) {
-  res.setHeader('Set-Cookie', serialize(COOKIE, '', { path: '/', maxAge: 0 }));
+  res.setHeader(
+    'Set-Cookie',
+    serialize(COOKIE, '', {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 0,
+      secure: process.env.NODE_ENV === 'production',
+    })
+  );
 }
