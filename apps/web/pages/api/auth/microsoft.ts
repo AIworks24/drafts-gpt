@@ -13,7 +13,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.query.action === "login") {
     const url = await msalApp.getAuthCodeUrl({
       scopes,
-      redirectUri: AZURE_REDIRECT_URI,
+      redirectUri: process.env.AZURE_REDIRECT_URI!,
       prompt: "select_account"
     });
     return res.redirect(url);
@@ -27,7 +27,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const token = await msalApp.acquireTokenByCode({
       code,
       scopes,
-      redirectUri: AZURE_REDIRECT_URI
+      redirectUri: process.env.AZURE_REDIRECT_URI!
     });
 
     const upn = token.account?.username || "";
