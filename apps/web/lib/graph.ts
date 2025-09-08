@@ -1,60 +1,39 @@
-const GRAPH_BASE = process.env.GRAPH_BASE || 'https://graph.microsoft.com/v1.0';
+const BASE = process.env.GRAPH_BASE || 'https://graph.microsoft.com/v1.0';
 
-export async function graphGet(accessToken: string, path: string) {
-  const r = await fetch(`${GRAPH_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    throw new Error(`Graph GET ${path} failed: ${r.status} ${text}`);
-  }
+async function asJson(r: Response) {
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return t; }
+}
+
+export async function gGet(token: string, path: string) {
+  const r = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) throw new Error(`GET ${path} ${r.status} ${await r.text()}`);
   return r.json();
 }
 
-export async function graphPost(accessToken: string, path: string, body?: any) {
-  const r = await fetch(`${GRAPH_BASE}${path}`, {
+export async function gPost(token: string, path: string, body?: any) {
+  const r = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined
   });
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    throw new Error(`Graph POST ${path} failed: ${r.status} ${text}`);
-  }
+  if (!r.ok) throw new Error(`POST ${path} ${r.status} ${await asJson(r)}`);
   return r.json();
 }
 
-export async function graphPatch(accessToken: string, path: string, body: any) {
-  const r = await fetch(`${GRAPH_BASE}${path}`, {
+export async function gPatch(token: string, path: string, body: any) {
+  const r = await fetch(`${BASE}${path}`, {
     method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    throw new Error(`Graph PATCH ${path} failed: ${r.status} ${text}`);
-  }
-  if (r.status === 204) return null;
-  return r.json().catch(() => null);
+  if (!r.ok && r.status !== 204) throw new Error(`PATCH ${path} ${r.status} ${await asJson(r)}`);
+  return r.status === 204 ? null : r.json();
 }
 
-// convenience helpers used by your API routes
-export async function getMessage(accessToken: string, id: string) {
-  return graphGet(accessToken, `/me/messages/${id}`);
+export async function createReplyDraft(token: string, id: string, replyAll = false) {
+  return gPost(token, `/me/messages/${id}/${replyAll ? 'createReplyAll' : 'createReply'}`);
 }
-
-export async function createReplyDraft(accessToken: string, id: string, replyAll = false) {
-  return graphPost(accessToken, `/me/messages/${id}/${replyAll ? 'createReplyAll' : 'createReply'}`);
-}
-
-export async function updateDraftBody(accessToken: string, draftId: string, html: string) {
-  return graphPatch(accessToken, `/me/messages/${draftId}`, {
-    body: { contentType: 'html', content: html }
-  });
+export async function updateDraftBody(token: string, draftId: string, html: string) {
+  return gPatch(token, `/me/messages/${draftId}`, { body: { contentType: 'html', content: html } });
 }
