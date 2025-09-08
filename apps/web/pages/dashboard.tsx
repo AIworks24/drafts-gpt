@@ -7,8 +7,12 @@ import { getSession } from "@/lib/session";
 type Props = { signedIn: boolean };
 
 export const getServerSideProps: GetServerSideProps<Props> = async ({ req }) => {
-  const sess = getSession(req);
-  return { props: { signedIn: !!sess?.userId } };
+  // Normalize just the cookie header for our getSession() helper
+  const cookieHeader =
+    Array.isArray(req.headers.cookie) ? req.headers.cookie.join('; ') : (req.headers.cookie || '');
+
+  const sess = getSession({ headers: { cookie: cookieHeader } });
+  return { props: { signedIn: !!sess?.upn } }; // we store `upn`, not `userId`
 };
 
 export default function Dashboard({ signedIn }: Props) {
