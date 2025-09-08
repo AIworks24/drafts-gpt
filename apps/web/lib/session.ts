@@ -6,7 +6,7 @@ import { createHmac } from 'crypto';
 const COOKIE = 'dgpt_sess';
 const SECRET = process.env.SESSION_SECRET!;
 
-type SessionData = { upn?: string; account?: any };
+export type SessionData = { upn?: string; account?: any; userId?: string };
 
 function sign(v: string) {
   return createHmac('sha256', SECRET).update(v).digest('hex');
