@@ -1,2 +1,11 @@
-import { ConfidentialClientApplication } from '@azure/msal-node';
-export const msalApp=new ConfidentialClientApplication({auth:{clientId:process.env.MICROSOFT_CLIENT_ID!,authority:`https://login.microsoftonline.com/${process.env.MICROSOFT_TENANT_ID||'common'}`,clientSecret:process.env.MICROSOFT_CLIENT_SECRET!}});
+/**
+ * Placeholder for acquiring a Microsoft Graph access token.
+ * Replace with your MSAL / cookie session flow as needed.
+ */
+export type AccessTokenResult = { accessToken: string };
+
+export async function requireGraphAccessToken(req: any): Promise<AccessTokenResult> {
+  // In your real app, fetch the user's access token from your session / Supabase / cookies
+  // and return it. For now we throw to avoid accidental usage in prod without wiring.
+  throw new Error('requireGraphAccessToken not implemented. Wire your MSAL/session flow.');
+}
