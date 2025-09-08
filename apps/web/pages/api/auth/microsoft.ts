@@ -31,7 +31,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         redirectUri: process.env.AZURE_REDIRECT_URI!,
       });
       const upn = result?.account?.username || '';
-      setSession(res, { upn, account: result.account });
+setSession(res, { upn, account: result.account });
 
       // Best-effort: persist MSAL cache for webhooks
       try {

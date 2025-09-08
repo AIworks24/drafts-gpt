@@ -10,6 +10,8 @@ const SECRET = process.env.SESSION_SECRET || 'dev-secret';
 export type SessionData = {
   userId?: string;
   state?: string;
+  upn?: string;
+  account?: any;
 };
 
 // sign/verify a compact cookie payload
