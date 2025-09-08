@@ -1,18 +1,42 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { getClientByUser, upsertClient } from "@/lib/config";
+import { supabase } from "@/lib/supabase";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method === "GET") {
-    const c = await getClientByUser("self");
-    if (!c) {
-      const created = await upsertClient({ name: "My Client", tone: { voice: "neutral" }, policies: "" });
-      return res.json(created);
+  try {
+    if (req.method === "GET") {
+      // Get first client; create a default one if none exists
+      const { data: one, error: selErr } = await supabase
+        .from("clients")
+        .select("*")
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (selErr) return res.status(500).json({ error: selErr.message });
+
+      if (!one) {
+        const { data: created, error: insErr } = await supabase
+          .from("clients")
+          .insert({ name: "My Client", tone: { voice: "neutral" }, policies: "" })
+          .select("*")
+          .maybeSingle();
+        if (insErr) return res.status(500).json({ error: insErr.message });
+        return res.json(created);
+      }
+
+      return res.json(one);
     }
-    return res.json(c);
+
+    if (req.method === "POST") {
+      const body = req.body || {};
+      const { data, error } = await supabase.from("clients").upsert(body).select("*").maybeSingle();
+      if (error) return res.status(500).json({ error: error.message });
+      return res.json(data);
+    }
+
+    return res.status(405).json({ error: "Method Not Allowed" });
+  } catch (e: any) {
+    console.error("clients api error", e);
+    return res.status(500).json({ error: e?.message || "Unexpected error" });
   }
-  if (req.method === "POST") {
-    const saved = await upsertClient(req.body);
-    return res.json(saved);
-  }
-  return res.status(405).end();
 }
