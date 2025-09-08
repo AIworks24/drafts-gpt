@@ -3,23 +3,15 @@ import OpenAI from "openai";
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-/** Shape you can pass from your API routes; it's flexible on purpose */
 export type DraftReplyInput = {
-  /** Raw plain-text from the latest inbound email (or whole thread) */
   originalPlain?: string;
-  /** Short summary of the thread if you already computed it */
   threadSummary?: string;
-  /** Optional subject hint; function will generate one if null */
   subject?: string | null;
-  /** Brand / client knobs */
-  tone?: "friendly" | "formal" | "neutral" | "concise" | "warm" | string;
+  tone?: string;                // "friendly" | "formal" | ...
   companyName?: string;
-  /** Optional canned template text the model can adapt */
-  template?: string;
-  /** Extra guardrails or business rules */
-  instructions?: string;
-  /** Locale hint */
-  locale?: string;
+  template?: string;            // a single template to adapt
+  instructions?: string;        // policy/guardrails text
+  locale?: string;              // e.g. "en-US"
 };
 
 export type DraftReplyOutput = {
@@ -27,15 +19,9 @@ export type DraftReplyOutput = {
   bodyHtml: string;
 };
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/**
- * draftReply — produce HTML email body (and optional subject) using OpenAI.
- * Designed to be tolerant of different inputs so your API routes don’t have to match
- * a rigid schema while you iterate.
- */
+/** Core LLM helper used by API routes. */
 export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutput> {
   const {
     originalPlain = "",
@@ -48,12 +34,12 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
     locale = "en-US",
   } = input;
 
-  // Build a compact prompt
   const system = [
     `You are an assistant that drafts professional email replies.`,
     `Write in ${tone} tone. Company: ${companyName || "N/A"}. Locale: ${locale}.`,
-    `Follow instructions if present. If insufficient info, be concise and ask for 1 clear next step.`,
-    `Output valid, simple HTML (paragraphs, strong, links). No inline CSS.`,
+    `Follow instructions if present. Be accurate, concise, and action-oriented.`,
+    `Output valid, minimal HTML (p, ul/li, strong, a). No inline CSS.`,
+    `Return JSON with keys: subject (string|null), body_html (string).`,
   ].join(" ");
 
   const user = [
@@ -61,7 +47,6 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
     instructions ? `POLICY/RULES:\n${instructions}\n` : "",
     threadSummary ? `THREAD SUMMARY:\n${threadSummary}\n` : "",
     `LATEST MESSAGE (plain text):\n${originalPlain}\n`,
-    `Return JSON with keys: subject (string|null), body_html (string).`,
   ].join("\n");
 
   try {
@@ -80,7 +65,6 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
     try {
       parsed = JSON.parse(raw);
     } catch {
-      // fallback: wrap the model text if it didn't return JSON
       parsed = { subject, body_html: `<p>${escapeHtml(raw)}</p>` };
     }
 
@@ -96,7 +80,6 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
 
     return { subject: safeSubject ?? null, bodyHtml: safeBody };
   } catch (err) {
-    // last-resort fallback so your build/routes never crash
     console.error("draftReply error:", err);
     return {
       subject: subject ?? null,
@@ -104,6 +87,74 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
         "<p>Thanks for reaching out. We’ve received your message and will get back to you shortly.</p>",
     };
   }
+}
+
+/**
+ * Compatibility wrapper used by some routes:
+ * Accepts a looser, “kitchen sink” object (client config, templates, toneProfile, etc.),
+ * picks what it needs, then calls `draftReply`.
+ */
+export async function draftReplyWithTone(input: any): Promise<DraftReplyOutput> {
+  // Try to pick the most specific text fields the route may pass
+  const originalPlain =
+    input?.originalPlain ??
+    input?.bodyPlain ??
+    input?.latestPlain ??
+    input?.messagePlain ??
+    "";
+
+  const tone =
+    input?.tone ??
+    input?.toneProfile?.voice ??
+    input?.toneProfile?.style ??
+    (input?.client?.tone?.voice ?? "neutral");
+
+  const companyName =
+    input?.companyName ??
+    input?.clientName ??
+    input?.client?.name ??
+    "";
+
+  // If a single template string is provided, use it.
+  // Otherwise, try to pick from an array by intent/category, else first item.
+  let template = input?.template ?? "";
+  const intent = input?.intent ?? input?.classification ?? "";
+  if (!template && Array.isArray(input?.templates) && input.templates.length) {
+    const byIntent = input.templates.find(
+      (t: any) =>
+        (t.intent && t.intent === intent) ||
+        (t.category && t.category === intent)
+    );
+    template = byIntent?.body || byIntent?.text || input.templates[0]?.body || input.templates[0]?.text || "";
+  }
+
+  const instructions =
+    input?.instructions ??
+    input?.policies ??
+    input?.client?.policies ??
+    "";
+
+  const threadSummary =
+    input?.threadSummary ?? input?.summary ?? "";
+
+  const subject =
+    typeof input?.subject === "string" ? input.subject : null;
+
+  const locale =
+    input?.locale ??
+    input?.client?.locale ??
+    "en-US";
+
+  return draftReply({
+    originalPlain,
+    threadSummary,
+    subject,
+    tone,
+    companyName,
+    template,
+    instructions,
+    locale,
+  });
 }
 
 /** tiny HTML escaper for the fallback path */
