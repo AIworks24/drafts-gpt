@@ -7,11 +7,11 @@ export type DraftReplyInput = {
   originalPlain?: string;
   threadSummary?: string;
   subject?: string | null;
-  tone?: string;                // "friendly" | "formal" | ...
+  tone?: string;
   companyName?: string;
-  template?: string;            // a single template to adapt
-  instructions?: string;        // policy/guardrails text
-  locale?: string;              // e.g. "en-US"
+  template?: string;
+  instructions?: string;
+  locale?: string;
 };
 
 export type DraftReplyOutput = {
@@ -21,7 +21,6 @@ export type DraftReplyOutput = {
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/** Core helper: returns { subject, bodyHtml } */
 export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutput> {
   const {
     originalPlain = "",
@@ -90,15 +89,13 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
 }
 
 /**
- * Compatibility wrapper for routes that expect:
- *   { json: { subject, body_html }, tokens }
- * We reuse draftReply() and reshape the result.
+ * Compatibility wrapper expected by API routes.
+ * Returns { json: {subject, body_html}, tokens: {prompt_tokens, completion_tokens, total_tokens} }
  */
 export async function draftReplyWithTone(input: any): Promise<{
   json: { subject: string | null; body_html: string };
-  tokens: number;
+  tokens: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }> {
-  // Normalize inputs that might come from your route
   const originalPlain =
     input?.originalPlain ??
     input?.bodyPlain ??
@@ -150,6 +147,14 @@ export async function draftReplyWithTone(input: any): Promise<{
 
   const locale = input?.locale ?? input?.client?.locale ?? "en-US";
 
+  // rough prompt/compl estimates (chars/4)
+  const promptChars =
+    (originalPlain?.length || 0) +
+    (threadSummary?.length || 0) +
+    (instructions?.length || 0) +
+    (template?.length || 0);
+  const prompt_tokens = Math.ceil(promptChars / 4);
+
   const out = await draftReply({
     originalPlain,
     threadSummary,
@@ -161,18 +166,17 @@ export async function draftReplyWithTone(input: any): Promise<{
     locale,
   });
 
-  // VERY rough token estimate (char/4). Good enough for reporting UI.
-  const approxTokens = Math.ceil(
+  const completion_tokens = Math.ceil(
     ((out.bodyHtml?.length || 0) + (out.subject?.length || 0)) / 4
   );
+  const total_tokens = prompt_tokens + completion_tokens;
 
   return {
     json: { subject: out.subject, body_html: out.bodyHtml },
-    tokens: approxTokens,
+    tokens: { prompt_tokens, completion_tokens, total_tokens },
   };
 }
 
-/** tiny HTML escaper for the fallback path */
 function escapeHtml(s: string) {
   return s
     .replaceAll("&", "&amp;")
