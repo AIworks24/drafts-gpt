@@ -1,7 +1,8 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { clearSession } from '@/lib/session';
+// apps/web/pages/api/auth/logout.ts
+import type { NextApiRequest, NextApiResponse } from "next";
+import { clearSession } from "@/lib/session";
 
-export default function handler(_req: NextApiRequest, res: NextApiResponse) {
+export default function handler(req: NextApiRequest, res: NextApiResponse) {
   clearSession(res);
-  res.redirect('/');
+  res.redirect("/dashboard");
 }
