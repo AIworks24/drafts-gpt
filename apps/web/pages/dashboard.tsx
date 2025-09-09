@@ -60,7 +60,7 @@ export default function Dashboard({ signedIn }: Props) {
         ) : (
           <>
             <div><strong>Microsoft 365</strong> — Not signed in</div>
-            <a href="/api/auth/microsoft" style={btnStyle}>Sign in</a>
+            <a href="/api/auth/login" style={btnStyle}>Sign in</a>
           </>
         )}
       </section>

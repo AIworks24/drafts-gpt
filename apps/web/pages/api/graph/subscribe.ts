@@ -9,7 +9,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
   const sess = getSession(req);
-  if (!sess?.userId) return res.status(401).json({ error: 'Not signed in' });
+  if (!sess?.upn) return res.status(401).json({ error: 'Not signed in' });
 
   try {
     // Load MSAL cache saved during callback
