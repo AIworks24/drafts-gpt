@@ -36,7 +36,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (cacheErr) throw cacheErr;
 
       // Session cookie used by the app
-      setSession(res, { userId: userRow.id, upn, account: result.account });
+      setSession(res, { userId: userRow.id, upn });
       return res.redirect('/dashboard');
     }
 
