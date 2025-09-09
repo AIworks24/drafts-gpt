@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
-import { supabase } from '@/lib/supabase';
+import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { setSession } from '@/lib/session';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
