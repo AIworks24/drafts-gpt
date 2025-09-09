@@ -7,24 +7,25 @@ import { draftReply } from '@/lib/enhanced-openai';
 export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
 function handleValidation(req: NextApiRequest, res: NextApiResponse) {
-  const token = req.query.validationToken as string | undefined;
-  console.log('Webhook validation request:', { token, query: req.query });
+  const validationToken = req.query.validationToken || req.body?.validationToken;
   
-  if (token) {
-    console.log('Returning validation token:', token);
-    return res.status(200).send(token);
+  if (validationToken) {
+    console.log('Webhook validation - returning token:', validationToken);
+    return res.status(200).send(validationToken);
   }
   
-  console.log('Missing validation token');
+  const token = req.query.validationToken as string | undefined;
+  if (token) return res.status(200).send(token);
   return res.status(400).send('Missing validationToken');
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   console.log('=== WEBHOOK RECEIVED ===');
   console.log('Method:', req.method);
-  console.log('Headers:', req.headers);
   console.log('Body:', JSON.stringify(req.body, null, 2));
   console.log('========================');
+
+  // Handle validation for both GET and POST requests
   const validationToken = req.query.validationToken || req.body?.validationToken;
   
   if (validationToken) {
@@ -50,22 +51,48 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
     console.log(`Processing ${events.length} events`);
+
     for (const n of events) {
       console.log('Processing event:', {
         subscriptionId: n.subscriptionId,
         messageId: n.resourceData?.id,
         lifecycleEvent: n.lifecycleEvent
       });
-      if (n.lifecycleEvent === 'reauthorizationRequired') continue;
 
-      // verify clientState, find the subscription row
-      const { data: sub } = await supabase
+      if (n.lifecycleEvent === 'reauthorizationRequired') {
+        console.log('Skipping reauthorization event');
+        continue;
+      }
+
+      console.log('Looking up subscription in database...');
+      
+      const { data: sub, error: subError } = await supabase
         .from('graph_subscriptions')
         .select('*')
         .eq('id', n.subscriptionId)
         .single();
-      if (!sub) continue;
-      if (sub.client_state !== n.clientState) continue;
+
+      console.log('Subscription lookup result:', { 
+        found: !!sub, 
+        error: subError?.message,
+        subscriptionId: n.subscriptionId 
+      });
+
+      if (!sub) {
+        console.log('No subscription found, continuing to next event');
+        continue;
+      }
+
+      console.log('Checking client state...');
+      if (sub.client_state !== n.clientState) {
+        console.log('Client state mismatch:', { 
+          stored: sub.client_state, 
+          received: n.clientState 
+        });
+        continue;
+      }
+
+      console.log('Getting token cache for user:', sub.user_id);
 
       // hydrate MSAL cache for this user
       const { data: cacheRow } = await supabase
@@ -73,21 +100,45 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .select('*')
         .eq('user_id', sub.user_id)
         .single();
-      if (!cacheRow) continue;
+
+      if (!cacheRow) {
+        console.log('No token cache found for user');
+        continue;
+      }
+
+      console.log('Found token cache, acquiring access token...');
 
       const cache = msalApp.getTokenCache();
       cache.deserialize(JSON.stringify(cacheRow.cache_json));
       const [account] = await cache.getAllAccounts();
-      if (!account) continue;
+      
+      if (!account) {
+        console.log('No account found in token cache');
+        continue;
+      }
 
       const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
-      if (!token?.accessToken) continue;
+      if (!token?.accessToken) {
+        console.log('Failed to acquire access token');
+        continue;
+      }
+
+      console.log('Got access token, processing message...');
 
       const messageId: string | undefined = n.resourceData?.id;
-      if (!messageId) continue;
+      if (!messageId) {
+        console.log('No message ID found');
+        continue;
+      }
 
       // Fetch the full message
       const msg = await gGet(token.accessToken, `/me/messages/${messageId}`);
+      if (!msg) {
+        console.log('Failed to fetch message from Graph API');
+        continue;
+      }
+
+      console.log('Fetched message, extracting content...');
 
       // Extract subject and a plain-text body we can feed to the model
       const subject: string = msg?.subject ?? '';
@@ -102,6 +153,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
       if (!bodyText) bodyText = String(msg?.bodyPreview ?? '');
 
+      console.log('Message details:', {
+        subject,
+        from: msg?.from?.emailAddress?.address,
+        bodyLength: bodyText.length
+      });
+
       // Get client configuration
       const { data: user } = await supabase
         .from('users')
@@ -114,9 +171,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .eq('id', sub.user_id)
         .single();
 
-      if (!user?.clients) continue;
+      if (!user?.clients) {
+        console.log('No client found for user');
+        continue;
+      }
 
       const client = user.clients as any;
+      console.log('Found client:', client.name);
 
       // Get templates for this client
       const { data: templates } = await supabase
@@ -127,12 +188,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .order('created_at', { ascending: true });
 
       const template = templates?.[0]?.body_md || '';
+      console.log('Using template:', !!template);
 
       // Check if this looks like a meeting request
       const looksLikeMeetingRequest = /\b(meeting|call|schedule|available|time|when|calendar)\b/i.test(subject + ' ' + bodyText);
       
       let meetingTimes: string[] = [];
       if (looksLikeMeetingRequest) {
+        console.log('Detected meeting request, finding available times...');
         try {
           const now = new Date();
           const inWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
@@ -145,12 +208,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             durationISO: 'PT30M',
             maxCandidates: 3
           });
+          console.log(`Found ${meetingTimes.length} available meeting times`);
         } catch (error) {
           console.warn('Failed to get meeting times:', error);
         }
       }
 
-      // Draft the reply (using your existing draftReply function)
+      console.log('Generating AI response...');
+
+      // Draft the reply
       const ai = await draftReply({
         originalPlain: bodyText,
         subject,
@@ -175,9 +241,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         html += `<br/><br/>${client.signature}`;
       }
 
+      console.log('Creating draft reply...');
+
       // Create a reply draft and patch the body (leave as Draft)
       const draft = await createReplyDraft(token.accessToken, messageId, false);
       await updateDraftBody(token.accessToken, draft.id, html);
+
+      console.log('Draft created successfully:', draft.id);
 
       // Record usage
       const tokens = ai?.tokens || { prompt: 0, completion: 0, total: 0 };
@@ -204,6 +274,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       if (usageError) {
         console.error('Failed to record usage:', usageError);
+      } else {
+        console.log('Usage recorded successfully');
       }
     }
   } catch (e) {
