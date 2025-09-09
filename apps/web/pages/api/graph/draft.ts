@@ -2,8 +2,8 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { msalApp, MS_SCOPES } from "@/lib/msal";
 import { getMessage, createReplyDraft, updateDraftBody, findMeetingTimes } from "@/lib/graph";
-import { draftReply } from "@/lib/openai";
-import { getClientByUser, getClientTemplates, recordUsage } from "@/lib/config";
+import { draftReply } from "@/lib/enhanced-openai";
+import { getClientByUser, getClientTemplates, recordUsage } from "@/lib/client-config";
 
 /**
  * POST /api/graph/draft
@@ -52,6 +52,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const templates = await getClientTemplates(client?.id);
     const templateBody = templates?.[0]?.body ?? "";
 
+
     // 4) optional meeting times  ❗ FIX: call with (accessToken, opts)
     let slotLines: string[] = [];
     if (suggestTimes) {
@@ -73,7 +74,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       subject,
       tone: client?.tone?.voice ?? "neutral",
       companyName: client?.name ?? "",
-      template: templateBody,
+      template: templateBody || "",
       instructions: client?.policies ?? "",
     });
 
