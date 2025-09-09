@@ -20,11 +20,28 @@ function handleValidation(req: NextApiRequest, res: NextApiResponse) {
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method === 'GET') return handleValidation(req, res);
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  // Handle validation for both GET and POST requests
+  const validationToken = req.query.validationToken || req.body?.validationToken;
+  
+  if (validationToken) {
+    console.log('Webhook validation - returning token:', validationToken);
+    return res.status(200).send(validationToken);
+  }
 
-  // Immediately acknowledge to prevent retry storms
-  res.status(202).json({ ok: true });
+  if (req.method === 'GET') {
+    return res.status(400).send('Missing validationToken');
+  }
+  
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+
+  // Only acknowledge normal webhook notifications, not validation requests
+  if (req.body?.value) {
+    res.status(202).json({ ok: true });
+  } else {
+    return res.status(400).send('Invalid webhook request');
+  }
 
   try {
     const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
