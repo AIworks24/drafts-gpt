@@ -15,6 +15,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(401).json({ error: 'Not signed in' });
     }
 
+    console.log('Processing subscription request for user:', sess.userId);
+
     // Get user's MSAL token cache
     const { data: cacheRow } = await supabase
       .from('msal_token_cache')
@@ -23,6 +25,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .single();
 
     if (!cacheRow) {
+      console.log('No token cache found for user');
       return res.status(401).json({ error: 'No token cache for user. Please sign in again.' });
     }
 
@@ -33,8 +36,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const account = accounts[0];
     
     if (!account) {
+      console.log('No account found in cache');
       return res.status(401).json({ error: 'No account in cache. Please sign in again.' });
     }
+
+    console.log('Getting access token for account:', account.username);
 
     // Get access token
     const tokenResult = await msalApp.acquireTokenSilent({ 
@@ -46,15 +52,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     if (!tokenResult?.accessToken) {
+      console.log('Failed to acquire access token');
       return res.status(401).json({ error: 'Failed to acquire access token. Please sign in again.' });
     }
 
     // Check for existing active subscription
     const { data: existingSubs } = await supabase
       .from('graph_subscriptions')
-      .select('id, expires_at')
+      .select('id, expires_at, active')
       .eq('user_id', sess.userId)
       .eq('active', true);
+
+    console.log('Existing subscriptions:', existingSubs?.length || 0);
 
     // Clean up expired subscriptions
     if (existingSubs && existingSubs.length > 0) {
@@ -62,18 +71,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const expiredSubs = existingSubs.filter(sub => new Date(sub.expires_at) < now);
       
       if (expiredSubs.length > 0) {
-        await supabase
+        console.log('Cleaning up expired subscriptions:', expiredSubs.length);
+        const { error: cleanupError } = await supabase
           .from('graph_subscriptions')
           .update({ active: false })
           .in('id', expiredSubs.map(s => s.id));
+        
+        if (cleanupError) {
+          console.error('Failed to cleanup expired subscriptions:', cleanupError);
+        }
       }
 
       // Check if we have any active subscriptions left
       const activeSubs = existingSubs.filter(sub => new Date(sub.expires_at) >= now);
       if (activeSubs.length > 0) {
+        console.log('Active subscription already exists');
         return res.status(200).json({ 
           success: true, 
-          message: 'Already subscribed',
+          message: 'Already subscribed to mailbox notifications',
           subscription: activeSubs[0] 
         });
       }
@@ -84,12 +99,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const expirationTime = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
     const clientState = `dgpt-${sess.userId}-${Date.now()}`;
 
-    console.log('Creating Graph subscription:', {
-      webhookUrl,
-      expirationTime: expirationTime.toISOString(),
-      clientState
-    });
-
     const subscriptionData = {
       changeType: 'created',
       notificationUrl: webhookUrl,
@@ -97,6 +106,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       expirationDateTime: expirationTime.toISOString(),
       clientState: clientState,
     };
+
+    console.log('Creating Graph subscription with data:', {
+      webhookUrl,
+      expirationTime: expirationTime.toISOString(),
+      clientState,
+      resource: '/me/messages'
+    });
 
     const response = await axios.post(
       'https://graph.microsoft.com/v1.0/subscriptions',
@@ -106,12 +122,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           'Authorization': `Bearer ${tokenResult.accessToken}`,
           'Content-Type': 'application/json'
         },
-        timeout: 10000 // 10 second timeout
+        timeout: 15000
       }
     );
 
+    console.log('Graph subscription created successfully:', response.data.id);
+
     if (!response.data?.id) {
-      throw new Error('Invalid response from Microsoft Graph API');
+      throw new Error('Invalid response from Microsoft Graph API - no subscription ID');
     }
 
     // Save subscription to database
@@ -126,18 +144,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
 
     if (insertError) {
-      console.error('Failed to save subscription:', insertError);
+      console.error('Failed to save subscription to database:', insertError);
+      
       // Try to delete the subscription from Graph since we couldn't save it
       try {
         await axios.delete(
           `https://graph.microsoft.com/v1.0/subscriptions/${response.data.id}`,
           { headers: { 'Authorization': `Bearer ${tokenResult.accessToken}` } }
         );
+        console.log('Cleaned up Graph subscription after database error');
       } catch (deleteError) {
         console.error('Failed to cleanup Graph subscription:', deleteError);
       }
-      throw new Error('Failed to save subscription to database');
+      
+      return res.status(500).json({ error: 'Failed to save subscription to database' });
     }
+
+    console.log('Subscription saved to database successfully');
 
     return res.status(200).json({ 
       success: true, 
@@ -145,17 +168,37 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       subscription: {
         id: response.data.id,
         expiresAt: response.data.expirationDateTime,
-        resource: response.data.resource
+        resource: response.data.resource,
+        notificationUrl: response.data.notificationUrl
       }
     });
 
   } catch (error: any) {
-    console.error('Webhook subscription error:', error);
+    console.error('Webhook subscription error:', {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      config: {
+        url: error.config?.url,
+        method: error.config?.method,
+        headers: error.config?.headers ? Object.keys(error.config.headers) : undefined
+      }
+    });
     
-    // Provide more specific error messages
+    // Provide specific error messages based on response
+    if (error.response?.status === 400) {
+      const errorDetails = error.response.data?.error;
+      return res.status(400).json({ 
+        error: `Microsoft Graph rejected the subscription: ${errorDetails?.message || 'Bad Request'}`,
+        details: errorDetails,
+        webhookUrl: `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`
+      });
+    }
+    
     if (error.response?.status === 403) {
       return res.status(403).json({ 
-        error: 'Insufficient permissions. Please ensure your app has Mail.Read permissions.' 
+        error: 'Insufficient permissions. Your app needs Mail.Read permissions in Azure.' 
       });
     }
     
@@ -167,12 +210,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
       return res.status(500).json({ 
-        error: 'Network error. Please check your internet connection and try again.' 
+        error: 'Network error connecting to Microsoft Graph API.' 
+      });
+    }
+
+    if (error.code === 'ECONNABORTED') {
+      return res.status(500).json({ 
+        error: 'Request timeout. Microsoft Graph API did not respond in time.' 
       });
     }
 
     return res.status(500).json({ 
-      error: error.message || 'Failed to create webhook subscription' 
+      error: error.response?.data?.error?.message || error.message || 'Failed to create webhook subscription',
+      webhookUrl: `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`
     });
   }
 }
