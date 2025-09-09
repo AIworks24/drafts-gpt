@@ -51,17 +51,24 @@ export interface UsageEvent {
 export async function getClientByUserId(userId?: string): Promise<Client | null> {
   if (!userId) return null;
   
-  const { data, error } = await supabaseBrowser
+  // Get the user's client_id first
+  const { data: user, error: userError } = await supabaseBrowser
     .from('users')
-    .select(`
-      client_id,
-      clients (*)
-    `)
+    .select('client_id')
     .eq('id', userId)
     .single();
 
-  if (error || !data?.clients) return null;
-  return data.clients as Client;
+  if (userError || !user?.client_id) return null;
+
+  // Then get the client data
+  const { data: client, error: clientError } = await supabaseBrowser
+    .from('clients')
+    .select('*')
+    .eq('id', user.client_id)
+    .single();
+
+  if (clientError || !client) return null;
+  return client as Client;
 }
 
 export async function getClientTemplates(clientId: string): Promise<Template[]> {
