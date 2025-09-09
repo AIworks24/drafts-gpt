@@ -56,47 +56,49 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(401).json({ error: 'Failed to acquire access token. Please sign in again.' });
     }
 
-    // Check for existing active subscription
+    // BULLETPROOF SUBSCRIPTION MANAGEMENT
+    console.log('Cleaning up existing subscriptions...');
+
+    // Get all existing subscriptions for this user
     const { data: existingSubs } = await supabase
       .from('graph_subscriptions')
       .select('id, expires_at, active')
-      .eq('user_id', sess.userId)
-      .eq('active', true);
+      .eq('user_id', sess.userId);
 
-    console.log('Existing subscriptions:', existingSubs?.length || 0);
-
-    // Clean up expired subscriptions
+    // Deactivate all existing subscriptions in our database
     if (existingSubs && existingSubs.length > 0) {
-      const now = new Date();
-      const expiredSubs = existingSubs.filter(sub => new Date(sub.expires_at) < now);
+      console.log(`Found ${existingSubs.length} existing subscriptions, deactivating...`);
       
-      if (expiredSubs.length > 0) {
-        console.log('Cleaning up expired subscriptions:', expiredSubs.length);
-        const { error: cleanupError } = await supabase
-          .from('graph_subscriptions')
-          .update({ active: false })
-          .in('id', expiredSubs.map(s => s.id));
-        
-        if (cleanupError) {
-          console.error('Failed to cleanup expired subscriptions:', cleanupError);
-        }
+      const { error: deactivateError } = await supabase
+        .from('graph_subscriptions')
+        .update({ active: false })
+        .eq('user_id', sess.userId);
+      
+      if (deactivateError) {
+        console.error('Failed to deactivate existing subscriptions:', deactivateError);
       }
 
-      // Check if we have any active subscriptions left
-      const activeSubs = existingSubs.filter(sub => new Date(sub.expires_at) >= now);
-      if (activeSubs.length > 0) {
-        console.log('Active subscription already exists');
-        return res.status(200).json({ 
-          success: true, 
-          message: 'Already subscribed to mailbox notifications',
-          subscription: activeSubs[0] 
-        });
+      // Try to delete the old subscriptions from Microsoft Graph
+      for (const oldSub of existingSubs) {
+        try {
+          await axios.delete(
+            `https://graph.microsoft.com/v1.0/subscriptions/${oldSub.id}`,
+            { 
+              headers: { 'Authorization': `Bearer ${tokenResult.accessToken}` },
+              timeout: 5000
+            }
+          );
+          console.log(`Deleted old Graph subscription: ${oldSub.id}`);
+        } catch (deleteError) {
+          // Don't fail the whole process if we can't delete old subscriptions
+          console.warn(`Failed to delete old Graph subscription ${oldSub.id}:`, deleteError.response?.status);
+        }
       }
     }
 
     // Create new Graph subscription
     const webhookUrl = `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`;
-    const expirationTime = new Date(Date.now() + 4230 * 60 * 1000); // ~3days (max)
+    const expirationTime = new Date(Date.now() + 4230 * 60 * 1000); // ~3 days (max allowed)
     const clientState = `dgpt-${sess.userId}-${Date.now()}`;
 
     const subscriptionData = {
@@ -107,7 +109,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       clientState: clientState,
     };
 
-    console.log('Creating Graph subscription with data:', {
+    console.log('Creating new Graph subscription with data:', {
       webhookUrl,
       expirationTime: expirationTime.toISOString(),
       clientState,
@@ -132,7 +134,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       throw new Error('Invalid response from Microsoft Graph API - no subscription ID');
     }
 
-    // Save subscription to database
+    // Save new subscription to database
     const { error: insertError } = await supabase
       .from('graph_subscriptions')
       .insert({
@@ -162,6 +164,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log('Subscription saved to database successfully');
 
+    // Verify the subscription is working by checking if we can find it
+    const { data: verifySubscription } = await supabase
+      .from('graph_subscriptions')
+      .select('*')
+      .eq('id', response.data.id)
+      .single();
+
+    if (!verifySubscription) {
+      console.error('Subscription verification failed - not found in database');
+      return res.status(500).json({ error: 'Subscription created but verification failed' });
+    }
+
+    console.log('Subscription verified successfully');
+
     return res.status(200).json({ 
       success: true, 
       message: 'Successfully subscribed to mailbox notifications',
@@ -169,8 +185,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         id: response.data.id,
         expiresAt: response.data.expirationDateTime,
         resource: response.data.resource,
-        notificationUrl: response.data.notificationUrl
-      }
+        notificationUrl: response.data.notificationUrl,
+        clientState: clientState
+      },
+      cleanedUp: existingSubs?.length || 0
     });
 
   } catch (error: any) {
@@ -181,8 +199,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       data: error.response?.data,
       config: {
         url: error.config?.url,
-        method: error.config?.method,
-        headers: error.config?.headers ? Object.keys(error.config.headers) : undefined
+        method: error.config?.method
       }
     });
     
@@ -205,18 +222,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (error.response?.status === 401) {
       return res.status(401).json({ 
         error: 'Authentication failed. Please sign out and sign in again.' 
-      });
-    }
-
-    if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
-      return res.status(500).json({ 
-        error: 'Network error connecting to Microsoft Graph API.' 
-      });
-    }
-
-    if (error.code === 'ECONNABORTED') {
-      return res.status(500).json({ 
-        error: 'Request timeout. Microsoft Graph API did not respond in time.' 
       });
     }
 
