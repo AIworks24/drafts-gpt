@@ -20,7 +20,11 @@ function handleValidation(req: NextApiRequest, res: NextApiResponse) {
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // Handle validation for both GET and POST requests
+  console.log('=== WEBHOOK RECEIVED ===');
+  console.log('Method:', req.method);
+  console.log('Headers:', req.headers);
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('========================');
   const validationToken = req.query.validationToken || req.body?.validationToken;
   
   if (validationToken) {
@@ -45,7 +49,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
+    console.log(`Processing ${events.length} events`);
     for (const n of events) {
+      console.log('Processing event:', {
+        subscriptionId: n.subscriptionId,
+        messageId: n.resourceData?.id,
+        lifecycleEvent: n.lifecycleEvent
+      });
       if (n.lifecycleEvent === 'reauthorizationRequired') continue;
 
       // verify clientState, find the subscription row
