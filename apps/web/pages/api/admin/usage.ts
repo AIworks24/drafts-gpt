@@ -1,6 +1,6 @@
 // apps/web/pages/api/admin/usage.ts
 import type { NextApiRequest, NextApiResponse } from "next";
-import { supabase } from "@/lib/supabase";
+import { supabaseServer as supabase } from '@/lib/supabase-server';
 
 export default async function handler(_:NextApiRequest,res:NextApiResponse){
   const { data, error } = await supabase
