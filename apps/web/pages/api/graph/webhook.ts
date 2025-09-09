@@ -8,7 +8,14 @@ export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
 function handleValidation(req: NextApiRequest, res: NextApiResponse) {
   const token = req.query.validationToken as string | undefined;
-  if (token) return res.status(200).send(token);
+  console.log('Webhook validation request:', { token, query: req.query });
+  
+  if (token) {
+    console.log('Returning validation token:', token);
+    return res.status(200).send(token);
+  }
+  
+  console.log('Missing validation token');
   return res.status(400).send('Missing validationToken');
 }
 
