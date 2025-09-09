@@ -1,6 +1,6 @@
 // apps/web/pages/api/graph/webhook.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { supabase } from '@/lib/supabase';
+import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
 import { gGet, createReplyDraft, updateDraftBody } from '@/lib/graph';
 import { draftReply } from '@/lib/openai';

@@ -1,5 +1,5 @@
 // apps/web/lib/config.ts
-import { supabase } from "@/lib/supabase";
+import { supabaseBrowser as supabase } from '@/lib/supabase-browser';
 
 export async function getClientByUser(user_id?: string) {
   // naive: first client for now; wire user->client mapping later if needed
