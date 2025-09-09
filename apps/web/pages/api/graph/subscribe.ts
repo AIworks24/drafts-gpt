@@ -1,74 +1,53 @@
-// apps/web/pages/api/graph/subscribe.ts
-import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from '@/lib/session';
-import { msalApp } from '@/lib/msal';
 import { supabaseServer as supabase } from '@/lib/supabase-server';
+import { msalApp, MS_SCOPES } from '@/lib/msal';
 import axios from 'axios';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
-
+export default async function handler(req, res) {
   const sess = getSession(req);
-  if (!sess?.upn) return res.status(401).json({ error: 'Not signed in' });
-
-  try {
-    // Load MSAL cache saved during callback
-    const { data: cacheRow } = await supabase
-      .from('msal_token_cache')
-      .select('*')
-      .eq('user_id', sess.userId)
-      .single();
-
-    if (!cacheRow?.cache_json) {
-      return res.status(401).json({ error: 'No Token Cache for user' });
-    }
-
-    msalApp.getTokenCache().deserialize(JSON.stringify(cacheRow.cache_json));
-    const [account] = await msalApp.getTokenCache().getAllAccounts();
-    if (!account) return res.status(401).json({ error: 'No MSAL account in cache' });
-
-    const token = await msalApp.acquireTokenSilent({
-      account,
-      scopes: ['https://graph.microsoft.com/Mail.Read', 'https://graph.microsoft.com/Mail.ReadWrite'],
-    });
-
-    const notifUrl = `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`;
-    const clientState = process.env.EDGE_FUNCTION_SECRET || 'dgpt';
-
-    // Create a Graph subscription for new messages
-    const now = new Date();
-    const exp = new Date(now.getTime() + 60 * 60 * 1000); // 1h (extend/renew in prod)
-
-    const { data: sub } = await axios.post(
-      'https://graph.microsoft.com/v1.0/subscriptions',
-      {
-        changeType: 'created',
-        notificationUrl: notifUrl,
-        resource: '/me/messages',
-        expirationDateTime: exp.toISOString(),
-        clientState,
-        latestSupportedTlsVersion: 'v1_2',
-      },
-      { headers: { Authorization: `Bearer ${token.accessToken}` } }
-    );
-
-    // Save subscription (optional but recommended)
-    await supabase
-      .from('graph_subscriptions')
-      .upsert(
-        {
-          id: sub.id,
-          user_id: sess.userId,
-          client_state: clientState,
-          resource: sub.resource,
-          expiration: sub.expirationDateTime,
-        },
-        { onConflict: 'id' }
-      );
-
-    res.status(200).json({ ok: true, id: sub.id, expires: sub.expirationDateTime });
-  } catch (e: any) {
-    console.error('subscribe error', e?.response?.data || e?.message || e);
-    res.status(500).json({ error: 'Subscribe failed' });
+  if (!sess?.userId) {
+    return res.status(401).json({ error: 'Not signed in' });
   }
+
+  // get cache row
+  const { data: cacheRow } = await supabase
+    .from('msal_token_cache')
+    .select('*')
+    .eq('user_id', sess.userId)
+    .single();
+
+  if (!cacheRow) {
+    return res.status(401).json({ error: 'No token cache for user' });
+  }
+
+  // hydrate MSAL
+  msalApp.getTokenCache().deserialize(JSON.stringify(cacheRow.cache_json));
+  const account = (await msalApp.getTokenCache().getAllAccounts())[0];
+  if (!account) return res.status(401).json({ error: 'No account in cache' });
+
+  const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES });
+  if (!token?.accessToken) return res.status(401).json({ error: 'No access token' });
+
+  // create Graph subscription
+  const resp = await axios.post(
+    'https://graph.microsoft.com/v1.0/subscriptions',
+    {
+      changeType: 'created',
+      notificationUrl: process.env.WEBHOOK_BASE_URL + '/api/graph/webhook',
+      resource: '/me/messages',
+      expirationDateTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1h
+      clientState: 'dgpt',
+    },
+    { headers: { Authorization: `Bearer ${token.accessToken}` } }
+  );
+
+  // save subscription
+  await supabase.from('graph_subscriptions').upsert({
+    id: resp.data.id,
+    user_id: sess.userId,
+    client_state: resp.data.clientState,
+    expires_at: resp.data.expirationDateTime,
+  });
+
+  return res.json({ ok: true, sub: resp.data });
 }
