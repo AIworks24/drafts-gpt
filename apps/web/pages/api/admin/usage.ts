@@ -1,15 +1,33 @@
-// apps/web/pages/api/admin/usage.ts
-import type { NextApiRequest, NextApiResponse } from "next";
-import { supabaseServer as supabase } from '@/lib/supabase-server';
+// apps/web/pages/admin/usage.tsx
+import { useEffect, useState } from "react";
 
-export default async function handler(_:NextApiRequest,res:NextApiResponse){
-  const { data, error } = await supabase
-    .from("usage_events")
-    .select("*, clients(name)")
-    .order("created_at", { ascending: false })
-    .limit(200);
-  if (error) return res.status(500).json({ error: error.message });
-  // flatten client name for convenience
-  const rows = (data||[]).map((r:any)=>({ ...r, client_name: r.clients?.name }));
-  res.json(rows);
+export default function Usage() {
+  const [rows, setRows] = useState<any[]>([]);
+  useEffect(()=>{ (async ()=>{
+    const r = await fetch("/api/admin/usage");
+    setRows(await r.json());
+  })(); }, []);
+
+  return (
+    <main style={{padding:24,fontFamily:"system-ui"}}>
+      <h1>Usage</h1>
+      <table border={1} cellPadding={6} style={{marginTop:12}}>
+        <thead>
+          <tr><th>When</th><th>Client</th><th>Mailbox</th><th>Event</th><th>Prompt</th><th>Completion</th></tr>
+        </thead>
+        <tbody>
+          {rows.map(r=>(
+            <tr key={r.id}>
+              <td>{new Date(r.created_at).toLocaleString()}</td>
+              <td>{r.client_name || r.client_id}</td>
+              <td>{r.mailbox_upn}</td>
+              <td>{r.event_type}</td>
+              <td>{r.tokens_prompt}</td>
+              <td>{r.tokens_completion}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </main>
+  );
 }
