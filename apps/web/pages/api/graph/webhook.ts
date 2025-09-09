@@ -3,7 +3,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
 import { gGet, createReplyDraft, updateDraftBody } from '@/lib/graph';
-import { draftReply } from '@/lib/openai';
+import { draftReply } from '@/lib/enhanced-openai';
 
 export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
