@@ -96,7 +96,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Create new Graph subscription
     const webhookUrl = `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`;
-    const expirationTime = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
+    const expirationTime = new Date(Date.now() + 4230 * 60 * 1000); // ~3days (max)
     const clientState = `dgpt-${sess.userId}-${Date.now()}`;
 
     const subscriptionData = {
