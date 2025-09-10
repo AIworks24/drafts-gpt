@@ -88,6 +88,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log('All active subscriptions in database:', allActiveSubs);
 
+      if (!subscription) {
+        console.log('No subscription found, continuing to next event');
+        continue;
+      }
+
+      console.log('Found subscription, continuing with processing...');
+
       console.log('Subscription lookup result:', { 
         found: !!subscription, 
         error: subscriptionError?.message,
@@ -109,7 +116,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
 
       console.log('Getting token cache for user:', subscription.user_id);
-
+   
       // hydrate MSAL cache for this user
       const { data: cacheRow } = await supabase
         .from('msal_token_cache')
