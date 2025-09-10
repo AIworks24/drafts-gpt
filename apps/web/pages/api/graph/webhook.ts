@@ -1,3 +1,4 @@
+// apps/web/pages/api/graph/webhook.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
@@ -5,19 +6,6 @@ import { gGet, createReplyDraft, updateDraftBody, findMeetingTimes } from '@/lib
 import { draftReply } from '@/lib/enhanced-openai';
 
 export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
-
-function handleValidation(req: NextApiRequest, res: NextApiResponse) {
-  const validationToken = req.query.validationToken || req.body?.validationToken;
-  
-  if (validationToken) {
-    console.log('Webhook validation - returning token:', validationToken);
-    return res.status(200).send(validationToken);
-  }
-  
-  const token = req.query.validationToken as string | undefined;
-  if (token) return res.status(200).send(token);
-  return res.status(400).send('Missing validationToken');
-}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   console.log('=== WEBHOOK RECEIVED ===');
@@ -41,168 +29,216 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Only acknowledge normal webhook notifications, not validation requests
-  if (req.body?.value) {
-    res.status(202).json({ ok: true });
-  } else {
-    return res.status(400).send('Invalid webhook request');
-  }
+  // Acknowledge receipt immediately
+  res.status(202).json({ ok: true });
 
   try {
     const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
     console.log(`Processing ${events.length} events`);
 
-    for (const n of events) {
-      console.log('Processing event:', {
-        subscriptionId: n.subscriptionId,
-        messageId: n.resourceData?.id,
-        lifecycleEvent: n.lifecycleEvent
+    for (const notification of events) {
+      console.log('\n=== PROCESSING NOTIFICATION ===');
+      console.log('Notification:', {
+        subscriptionId: notification.subscriptionId,
+        messageId: notification.resourceData?.id,
+        clientState: notification.clientState,
+        lifecycleEvent: notification.lifecycleEvent
       });
 
-      if (n.lifecycleEvent === 'reauthorizationRequired') {
+      if (notification.lifecycleEvent === 'reauthorizationRequired') {
         console.log('Skipping reauthorization event');
         continue;
       }
 
-      console.log('Looking up subscription in database...');
-      
-      console.log('Searching for subscription ID:', n.subscriptionId);
+      const subscriptionId = notification.subscriptionId;
+      const messageId = notification.resourceData?.id;
+      const clientState = notification.clientState;
 
+      if (!subscriptionId || !messageId) {
+        console.log('❌ Missing required fields, skipping');
+        continue;
+      }
+
+      console.log('\n=== DATABASE LOOKUP ===');
+      console.log(`Looking for subscription ID: ${subscriptionId}`);
+
+      // FIXED QUERY: The issue was in your original webhook code
+      // It was doing complex joins when it should first find the subscription, then get the user
       const { data: subscription, error: subscriptionError } = await supabase
         .from('graph_subscriptions')
         .select('*')
-        .eq('id', n.subscriptionId)
+        .eq('id', subscriptionId)
+        .eq('active', true)
         .single();
 
-      console.log('Raw query result:', { 
-        data: subscription, 
-        error: subscriptionError,
-        searchedId: n.subscriptionId
-      });
-
-      // Also try a broader search to see what subscriptions exist
-      const { data: allActiveSubs } = await supabase
-        .from('graph_subscriptions')
-        .select('id, user_id, active, client_state')
-        .eq('active', true);
-
-      console.log('All active subscriptions in database:', allActiveSubs);
-
-      if (!subscription) {
-        console.log('No subscription found, continuing to next event');
-        continue;
-      }
-
-      console.log('Found subscription, continuing with processing...');
-
-      console.log('Subscription lookup result:', { 
-        found: !!subscription, 
+      console.log('Subscription lookup result:', {
+        found: !!subscription,
         error: subscriptionError?.message,
-        subscriptionId: n.subscriptionId 
+        subscriptionData: subscription ? {
+          id: subscription.id,
+          user_id: subscription.user_id,
+          client_state: subscription.client_state,
+          active: subscription.active
+        } : null
       });
 
-      if (!subscription) {
-        console.log('No subscription found, continuing to next event');
+      if (subscriptionError || !subscription) {
+        console.log('❌ No subscription found');
         continue;
       }
 
-      console.log('Checking client state...');
-      if (subscription.client_state !== n.clientState) {
-        console.log('Client state mismatch:', { 
+      console.log('✅ Subscription found');
+
+      // Verify client state
+      if (subscription.client_state !== clientState) {
+        console.log('❌ Client state mismatch:', { 
           stored: subscription.client_state, 
-          received: n.clientState 
+          received: clientState 
         });
         continue;
       }
 
-      console.log('Getting token cache for user:', subscription.user_id);
-   
-      // hydrate MSAL cache for this user
-      const { data: cacheRow } = await supabase
-        .from('msal_token_cache')
+      console.log('✅ Client state verified');
+
+      // Now get the user separately
+      const { data: user, error: userError } = await supabase
+        .from('users')
         .select('*')
-        .eq('user_id', subscription.user_id)
+        .eq('id', subscription.user_id)
         .single();
 
-      if (!cacheRow) {
-        console.log('No token cache found for user');
+      console.log('User lookup result:', {
+        found: !!user,
+        error: userError?.message,
+        userData: user ? {
+          id: user.id,
+          upn: user.upn,
+          client_id: user.client_id
+        } : null
+      });
+
+      if (userError || !user) {
+        console.log('❌ No user found for subscription');
         continue;
       }
 
-      console.log('Found token cache, acquiring access token...');
+      console.log('✅ User found:', user.upn);
 
+      console.log('\n=== TOKEN ACQUISITION ===');
+
+      // Get token cache
+      const { data: cacheRow, error: cacheError } = await supabase
+        .from('msal_token_cache')
+        .select('cache_json')
+        .eq('user_id', user.id)
+        .single();
+
+      if (cacheError || !cacheRow) {
+        console.log('❌ No token cache found:', cacheError?.message);
+        continue;
+      }
+
+      console.log('✅ Token cache found');
+
+      // Hydrate MSAL cache
       const cache = msalApp.getTokenCache();
       cache.deserialize(JSON.stringify(cacheRow.cache_json));
-      const [account] = await cache.getAllAccounts();
+      const accounts = await cache.getAllAccounts();
       
-      if (!account) {
-        console.log('No account found in token cache');
+      if (!accounts || accounts.length === 0) {
+        console.log('❌ No accounts in token cache');
         continue;
       }
 
-      const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
-      if (!token?.accessToken) {
-        console.log('Failed to acquire access token');
+      const account = accounts[0];
+      const tokenResult = await msalApp.acquireTokenSilent({ 
+        account, 
+        scopes: MS_SCOPES 
+      }).catch(error => {
+        console.log('❌ Token acquisition failed:', error.message);
+        return null;
+      });
+
+      if (!tokenResult?.accessToken) {
+        console.log('❌ No access token acquired');
         continue;
       }
 
-      console.log('Got access token, processing message...');
+      console.log('✅ Access token acquired');
 
-      const messageId: string | undefined = n.resourceData?.id;
-      if (!messageId) {
-        console.log('No message ID found');
+      console.log('\n=== MESSAGE PROCESSING ===');
+
+      // Fetch the message
+      let msg;
+      try {
+        msg = await gGet(tokenResult.accessToken, `/me/messages/${messageId}`);
+        console.log('✅ Message fetched successfully');
+      } catch (error: any) {
+        console.log('❌ Failed to fetch message:', error.message);
         continue;
       }
 
-      // Fetch the full message
-      const msg = await gGet(token.accessToken, `/me/messages/${messageId}`);
-      if (!msg) {
-        console.log('Failed to fetch message from Graph API');
-        continue;
-      }
+      // Extract message content
+      const subject = msg?.subject || '';
+      const fromEmail = msg?.from?.emailAddress?.address || '';
+      const fromName = msg?.from?.emailAddress?.name || '';
 
-      console.log('Fetched message, extracting content...');
+      console.log('Message details:', {
+        subject,
+        from: `${fromName} <${fromEmail}>`
+      });
 
-      // Extract subject and a plain-text body we can feed to the model
-      const subject: string = msg?.subject ?? '';
       let bodyText = '';
       if (msg?.body?.content) {
         const raw = String(msg.body.content);
-        if (msg.body.contentType === 'html') {
-          bodyText = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); // strip HTML tags
+        if (msg.body.contentType?.toLowerCase() === 'html') {
+          bodyText = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
         } else {
           bodyText = raw;
         }
       }
-      if (!bodyText) bodyText = String(msg?.bodyPreview ?? '');
+      if (!bodyText) {
+        bodyText = String(msg?.bodyPreview || '');
+      }
 
-      console.log('Message details:', {
-        subject,
-        from: msg?.from?.emailAddress?.address,
-        bodyLength: bodyText.length
-      });
+      console.log('\n=== CLIENT CONFIGURATION ===');
 
-      // Get client configuration
-      const { data: user } = await supabase
-        .from('users')
-        .select(`
-          id,
-          upn,
-          client_id,
-          clients (*)
-        `)
-        .eq('id', subscription.user_id)
-        .single();
+      // Get client - handle case where user might not have client_id set
+      let client = null;
+      if (user.client_id) {
+        const { data: clientData } = await supabase
+          .from('clients')
+          .select('*')
+          .eq('id', user.client_id)
+          .single();
+        client = clientData;
+      }
 
-      if (!user?.clients) {
-        console.log('No client found for user');
+      // If no client associated with user, get the first available client
+      if (!client) {
+        console.log('No client associated with user, getting first available client...');
+        const { data: firstClient } = await supabase
+          .from('clients')
+          .select('*')
+          .eq('active', true)
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .single();
+        client = firstClient;
+      }
+
+      if (!client) {
+        console.log('❌ No client found');
         continue;
       }
 
-      const client = user.clients as any;
-      console.log('Found client:', client.name);
+      console.log('✅ Client found:', {
+        id: client.id,
+        name: client.name,
+        tone: client.tone?.voice || 'professional'
+      });
 
-      // Get templates for this client
+      // Get templates
       const { data: templates } = await supabase
         .from('templates')
         .select('*')
@@ -211,35 +247,37 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .order('created_at', { ascending: true });
 
       const template = templates?.[0]?.body_md || '';
-      console.log('Using template:', !!template);
+      console.log('Template found:', !!template);
 
-      // Check if this looks like a meeting request
+      console.log('\n=== AI PROCESSING ===');
+
+      // Check for meeting request
       const looksLikeMeetingRequest = /\b(meeting|call|schedule|available|time|when|calendar)\b/i.test(subject + ' ' + bodyText);
-      
+      console.log('Meeting request detected:', looksLikeMeetingRequest);
+
       let meetingTimes: string[] = [];
       if (looksLikeMeetingRequest) {
-        console.log('Detected meeting request, finding available times...');
         try {
           const now = new Date();
           const inWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
           
-          meetingTimes = await findMeetingTimes(token.accessToken, {
-            attendee: msg?.from?.emailAddress?.address || '',
+          meetingTimes = await findMeetingTimes(tokenResult.accessToken, {
+            attendee: fromEmail,
             tz: client.timezone || 'UTC',
             windowStartISO: now.toISOString(),
             windowEndISO: inWeek.toISOString(),
             durationISO: 'PT30M',
             maxCandidates: 3
           });
-          console.log(`Found ${meetingTimes.length} available meeting times`);
-        } catch (error) {
-          console.warn('Failed to get meeting times:', error);
+          
+          console.log(`✅ Found ${meetingTimes.length} meeting times`);
+        } catch (error: any) {
+          console.log('⚠️ Meeting times lookup failed:', error.message);
         }
       }
 
+      // Generate AI response
       console.log('Generating AI response...');
-
-      // Draft the reply
       const ai = await draftReply({
         originalPlain: bodyText,
         subject,
@@ -249,9 +287,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         instructions: client.policies || undefined,
       });
 
-      let html: string = ai?.bodyHtml ?? '<p>Thanks for your email.</p>';
+      let html = ai?.bodyHtml || '<p>Thanks for your email.</p>';
 
-      // Add meeting times if available
+      // Add meeting times
       if (meetingTimes.length > 0) {
         const timesList = meetingTimes
           .map(time => `<li>${time}</li>`)
@@ -259,49 +297,71 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         html += `<p>Here are some times that work for us:</p><ul>${timesList}</ul>`;
       }
 
-      // Add signature if configured
+      // Add signature
       if (client.signature) {
         html += `<br/><br/>${client.signature}`;
       }
 
-      console.log('Creating draft reply...');
+      console.log('✅ AI response generated');
 
-      // Create a reply draft and patch the body (leave as Draft)
-      const draft = await createReplyDraft(token.accessToken, messageId, false);
-      await updateDraftBody(token.accessToken, draft.id, html);
+      console.log('\n=== DRAFT CREATION ===');
 
-      console.log('Draft created successfully:', draft.id);
+      // Create draft
+      try {
+        const draft = await createReplyDraft(tokenResult.accessToken, messageId, false);
+        await updateDraftBody(tokenResult.accessToken, draft.id, html);
+        
+        console.log('✅ Draft created successfully:', draft.id);
 
-      // Record usage
-      const tokens = ai?.tokens || { prompt: 0, completion: 0, total: 0 };
-      const estimatedCost = tokens.total * 0.000002;
+        // Record usage
+        const tokens = ai?.tokens || { prompt: 0, completion: 0, total: 0 };
+        const estimatedCost = tokens.total * 0.000002;
 
-      const { error: usageError } = await supabase.from('usage_events').insert({
-        client_id: client.id,
-        user_id: user.id,
-        mailbox_upn: user.upn,
-        event_type: 'webhook',
-        message_id: messageId,
-        draft_id: draft.id,
-        subject,
-        meta: {
-          from: msg?.from?.emailAddress?.address || '',
-          meetingTimesFound: meetingTimes.length,
-          templateUsed: !!template
-        },
-        tokens_prompt: tokens.prompt,
-        tokens_completion: tokens.completion,
-        cost_usd: estimatedCost,
-        status: 'completed'
-      });
+        const { error: usageError } = await supabase.from('usage_events').insert({
+          client_id: client.id,
+          user_id: user.id,
+          mailbox_upn: user.upn,
+          event_type: 'webhook',
+          message_id: messageId,
+          draft_id: draft.id,
+          subject,
+          meta: {
+            from: fromEmail,
+            meetingTimesFound: meetingTimes.length,
+            templateUsed: !!template
+          },
+          tokens_prompt: tokens.prompt,
+          tokens_completion: tokens.completion,
+          cost_usd: estimatedCost,
+          status: 'completed'
+        });
 
-      if (usageError) {
-        console.error('Failed to record usage:', usageError);
-      } else {
-        console.log('Usage recorded successfully');
+        if (usageError) {
+          console.log('⚠️ Failed to record usage:', usageError.message);
+        } else {
+          console.log('✅ Usage recorded');
+        }
+
+      } catch (error: any) {
+        console.log('❌ Draft creation failed:', error.message);
+        
+        // Record the error
+        await supabase.from('usage_events').insert({
+          client_id: client.id,
+          user_id: user.id,
+          mailbox_upn: user.upn,
+          event_type: 'webhook',
+          message_id: messageId,
+          subject,
+          meta: { error: error.message },
+          status: 'error'
+        });
       }
+
+      console.log('=== NOTIFICATION COMPLETE ===\n');
     }
-  } catch (e) {
-    console.error('webhook error', e);
+
+  } catch (error: any) {
+    console.error('❌ WEBHOOK ERROR:', error);
   }
 }
