@@ -66,39 +66,55 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log('Looking up subscription in database...');
       
-      const { data: sub, error: subError } = await supabase
+      console.log('Searching for subscription ID:', n.subscriptionId);
+
+      const { data: subscription, error: subscriptionError } = await supabase
         .from('graph_subscriptions')
         .select('*')
         .eq('id', n.subscriptionId)
         .single();
 
+      console.log('Raw query result:', { 
+        data: subscription, 
+        error: subscriptionError,
+        searchedId: n.subscriptionId
+      });
+
+      // Also try a broader search to see what subscriptions exist
+      const { data: allActiveSubs } = await supabase
+        .from('graph_subscriptions')
+        .select('id, user_id, active, client_state')
+        .eq('active', true);
+
+      console.log('All active subscriptions in database:', allActiveSubs);
+
       console.log('Subscription lookup result:', { 
-        found: !!sub, 
-        error: subError?.message,
+        found: !!subscription, 
+        error: subscriptionError?.message,
         subscriptionId: n.subscriptionId 
       });
 
-      if (!sub) {
+      if (!subscription) {
         console.log('No subscription found, continuing to next event');
         continue;
       }
 
       console.log('Checking client state...');
-      if (sub.client_state !== n.clientState) {
+      if (subscription.client_state !== n.clientState) {
         console.log('Client state mismatch:', { 
-          stored: sub.client_state, 
+          stored: subscription.client_state, 
           received: n.clientState 
         });
         continue;
       }
 
-      console.log('Getting token cache for user:', sub.user_id);
+      console.log('Getting token cache for user:', subscription.user_id);
 
       // hydrate MSAL cache for this user
       const { data: cacheRow } = await supabase
         .from('msal_token_cache')
         .select('*')
-        .eq('user_id', sub.user_id)
+        .eq('user_id', subscription.user_id)
         .single();
 
       if (!cacheRow) {
@@ -168,7 +184,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           client_id,
           clients (*)
         `)
-        .eq('id', sub.user_id)
+        .eq('id', subscription.user_id)
         .single();
 
       if (!user?.clients) {
