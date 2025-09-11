@@ -1,127 +1,80 @@
 // apps/web/pages/api/graph/webhook.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { supabaseServer as supabase } from '@/lib/supabase-server';
 
 export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  console.log('=== WEBHOOK RECEIVED ===');
-  console.log('Method:', req.method);
-  
-  // Handle validation for both GET and POST requests
+  // Handle validation
   const validationToken = req.query.validationToken || req.body?.validationToken;
-  
   if (validationToken) {
-    console.log('Webhook validation - returning token:', validationToken);
     return res.status(200).send(validationToken);
   }
 
-  if (req.method === 'GET') {
-    return res.status(400).send('Missing validationToken');
-  }
-  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Acknowledge receipt immediately
+  // Acknowledge immediately
   res.status(202).json({ ok: true });
 
-  console.log('DIAGNOSTIC: About to start processing...');
+  console.log('=== DIAGNOSTIC START ===');
 
+  // Test 1: Environment variables
+  console.log('ENV TEST:');
+  console.log('- SUPABASE_URL exists:', !!process.env.SUPABASE_URL);
+  console.log('- SUPABASE_SERVICE_ROLE_KEY exists:', !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+  console.log('- NODE_ENV:', process.env.NODE_ENV);
+
+  // Test 2: Can we import Supabase?
   try {
-    console.log('DIAGNOSTIC: Parsing events...');
-    const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
-    console.log(`DIAGNOSTIC: Found ${events.length} events`);
+    console.log('IMPORT TEST: Importing Supabase...');
+    const { createClient } = require('@supabase/supabase-js');
+    console.log('✅ Supabase import successful');
 
-    for (let i = 0; i < events.length; i++) {
-      const notification = events[i];
-      console.log(`DIAGNOSTIC: Processing event ${i + 1}/${events.length}`);
-      
-      const subscriptionId = notification.subscriptionId;
-      console.log(`DIAGNOSTIC: Subscription ID: ${subscriptionId}`);
+    // Test 3: Can we create client?
+    console.log('CLIENT TEST: Creating Supabase client...');
+    const supabase = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { auth: { persistSession: false } }
+    );
+    console.log('✅ Supabase client created');
 
-      if (!subscriptionId) {
-        console.log('DIAGNOSTIC: No subscription ID, skipping');
-        continue;
-      }
+    // Test 4: Can we query database?
+    console.log('DATABASE TEST: Testing simple query...');
+    const { data, error } = await Promise.race([
+      supabase.from('graph_subscriptions').select('count').limit(1),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Query timeout')), 5000))
+    ]);
 
-      console.log('DIAGNOSTIC: About to test database...');
+    if (error) {
+      console.log('❌ Database query error:', error);
+    } else {
+      console.log('✅ Database query successful:', data);
 
-      // Test 1: Simple query with timeout
-      try {
-        console.log('DIAGNOSTIC: Starting simple count query...');
-        
-        const startTime = Date.now();
-        const { count, error } = await supabase
+      // Test 5: Look for specific subscription
+      const events = Array.isArray(req.body?.value) ? req.body.value : [];
+      if (events.length > 0) {
+        const subscriptionId = events[0].subscriptionId;
+        console.log(`SUBSCRIPTION TEST: Looking for ${subscriptionId}...`);
+
+        const { data: sub, error: subError } = await supabase
           .from('graph_subscriptions')
-          .select('*', { count: 'exact', head: true });
-        
-        const endTime = Date.now();
-        console.log(`DIAGNOSTIC: Count query completed in ${endTime - startTime}ms`);
-        
-        if (error) {
-          console.log('DIAGNOSTIC: Count query error:', error);
-          console.log('DIAGNOSTIC: Error details:', JSON.stringify(error, null, 2));
+          .select('*')
+          .eq('id', subscriptionId);
+
+        if (subError) {
+          console.log('❌ Subscription query error:', subError);
         } else {
-          console.log(`DIAGNOSTIC: Count query success - found ${count} records`);
+          console.log('✅ Subscription query result:', sub);
         }
-      } catch (countError: any) {
-        console.log('DIAGNOSTIC: Count query exception:', countError.message);
-        console.log('DIAGNOSTIC: Exception stack:', countError.stack);
       }
-
-      console.log('DIAGNOSTIC: About to query specific subscription...');
-
-      // Test 2: Direct subscription lookup
-      try {
-        console.log(`DIAGNOSTIC: Looking for subscription ${subscriptionId}...`);
-        
-        const startTime = Date.now();
-        const result = await supabase
-          .from('graph_subscriptions')
-          .select('id, user_id, active, created_at')
-          .eq('id', subscriptionId)
-          .maybeSingle();
-        
-        const endTime = Date.now();
-        console.log(`DIAGNOSTIC: Subscription query completed in ${endTime - startTime}ms`);
-        
-        if (result.error) {
-          console.log('DIAGNOSTIC: Subscription query error:', result.error);
-          console.log('DIAGNOSTIC: Error details:', JSON.stringify(result.error, null, 2));
-        } else if (result.data) {
-          console.log('DIAGNOSTIC: Subscription found:', result.data);
-        } else {
-          console.log('DIAGNOSTIC: Subscription not found (null result)');
-        }
-      } catch (subError: any) {
-        console.log('DIAGNOSTIC: Subscription query exception:', subError.message);
-        console.log('DIAGNOSTIC: Exception stack:', subError.stack);
-      }
-
-      console.log('DIAGNOSTIC: About to check environment...');
-
-      // Test 3: Environment check
-      try {
-        console.log('DIAGNOSTIC: Environment variables:');
-        console.log('- SUPABASE_URL:', process.env.SUPABASE_URL ? 'SET' : 'NOT SET');
-        console.log('- SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SET' : 'NOT SET');
-        console.log('- NODE_ENV:', process.env.NODE_ENV);
-      } catch (envError: any) {
-        console.log('DIAGNOSTIC: Environment check failed:', envError.message);
-      }
-
-      console.log(`DIAGNOSTIC: Event ${i + 1} processing complete`);
     }
 
-    console.log('DIAGNOSTIC: All events processed successfully');
-
   } catch (error: any) {
-    console.error('DIAGNOSTIC: Top-level error:', error.message);
-    console.error('DIAGNOSTIC: Error stack:', error.stack);
-    console.error('DIAGNOSTIC: Error details:', JSON.stringify(error, null, 2));
+    console.log('❌ ERROR in diagnostic:', error.message);
+    console.log('Error stack:', error.stack);
   }
 
-  console.log('DIAGNOSTIC: Handler execution complete');
+  console.log('=== DIAGNOSTIC END ===');
 }
