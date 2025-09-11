@@ -1,175 +1,288 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabaseServer as supabase } from '@/lib/supabase-server';
 import { msalApp, MS_SCOPES } from '@/lib/msal';
-import { getMessage, createReplyDraft, updateDraftBody } from '@/lib/graph';
+import { getMessage, createReplyDraft, updateDraftBody, findMeetingTimes } from '@/lib/graph';
 import { draftReply } from '@/lib/enhanced-openai';
+import { getClientByUser, getClientTemplates, recordUsage } from '@/lib/client-config';
 
 export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
+
+function handleValidation(req: NextApiRequest, res: NextApiResponse) {
+  const validationToken = req.query.validationToken || req.body?.validationToken;
+  
+  if (validationToken) {
+    console.log('Webhook validation - returning token:', validationToken);
+    return res.status(200).send(validationToken);
+  }
+  
+  const token = req.query.validationToken as string | undefined;
+  if (token) return res.status(200).send(token);
+  return res.status(400).send('Missing validationToken');
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   console.log('=== WEBHOOK RECEIVED ===');
   console.log('Method:', req.method);
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('========================');
 
-  // Handle validation
+  // Handle validation for both GET and POST requests
   const validationToken = req.query.validationToken || req.body?.validationToken;
+  
   if (validationToken) {
     console.log('Webhook validation - returning token:', validationToken);
     return res.status(200).send(validationToken);
   }
 
+  if (req.method === 'GET') {
+    return res.status(400).send('Missing validationToken');
+  }
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Acknowledge immediately
-  res.status(202).json({ ok: true });
+  // Only acknowledge normal webhook notifications, not validation requests
+  if (req.body?.value) {
+    res.status(202).json({ ok: true });
+  } else {
+    return res.status(400).send('Invalid webhook request');
+  }
 
   try {
-    const events = Array.isArray(req.body?.value) ? req.body.value : [];
+    const events: any[] = Array.isArray(req.body?.value) ? req.body.value : [];
     console.log(`Processing ${events.length} events`);
 
-    for (const notification of events) {
-      const subscriptionId = notification.subscriptionId;
-      const messageId = notification.resourceData?.id;
-      
-      if (!subscriptionId || !messageId) {
-        console.log('Missing subscription ID or message ID');
+    for (const n of events) {
+      console.log('Processing event:', {
+        subscriptionId: n.subscriptionId,
+        messageId: n.resourceData?.id,
+        lifecycleEvent: n.lifecycleEvent
+      });
+
+      if (n.lifecycleEvent === 'reauthorizationRequired') {
+        console.log('Skipping reauthorization event');
         continue;
       }
 
-      console.log(`Processing subscription: ${subscriptionId}, message: ${messageId}`);
+      console.log('Looking up subscription in database...');
+      
+      console.log('Searching for subscription ID:', n.subscriptionId);
 
-      // Find the subscription
-      const { data: subscription } = await supabase
+      const { data: subscription, error: subscriptionError } = await supabase
         .from('graph_subscriptions')
         .select('*')
-        .eq('id', subscriptionId)
-        .eq('active', true)
+        .eq('id', n.subscriptionId)
         .single();
+
+      console.log('Subscription lookup result:', { 
+        found: !!subscription, 
+        error: subscriptionError?.message,
+        subscriptionId: n.subscriptionId 
+      });
 
       if (!subscription) {
-        console.log('Subscription not found');
+        console.log('No subscription found, continuing to next event');
         continue;
       }
 
-      // Get user
-      const { data: user } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', subscription.user_id)
-        .single();
-
-      if (!user) {
-        console.log('User not found');
+      console.log('Checking client state...');
+      if (subscription.client_state !== n.clientState) {
+        console.log('Client state mismatch:', { 
+          stored: subscription.client_state, 
+          received: n.clientState 
+        });
         continue;
       }
 
-      console.log(`Found user: ${user.upn}`);
-
-      // Get token cache - EXACT same pattern as your draft.ts
+      console.log('Getting token cache for user:', subscription.user_id);
+   
+      // hydrate MSAL cache for this user - EXACT same pattern as draft.ts
       const { data: cacheRow } = await supabase
         .from('msal_token_cache')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('user_id', subscription.user_id)
         .single();
 
       if (!cacheRow) {
-        console.log('No token cache found');
+        console.log('No token cache found for user');
         continue;
       }
 
-      // Get access token - EXACT same pattern as your draft.ts
+      console.log('Found token cache, acquiring access token...');
+
       const cache = msalApp.getTokenCache();
       cache.deserialize(JSON.stringify(cacheRow.cache_json));
       const [account] = await cache.getAllAccounts();
       
       if (!account) {
-        console.log('No account in cache');
+        console.log('No account found in token cache');
         continue;
       }
 
       const token = await msalApp.acquireTokenSilent({ account, scopes: MS_SCOPES }).catch(() => null);
       if (!token?.accessToken) {
-        console.log('Failed to acquire token');
+        console.log('Failed to acquire access token');
         continue;
       }
 
-      console.log('✅ Got access token');
+      console.log('Got access token, processing message...');
 
-      // Get the message
-      const msg = await getMessage(token.accessToken, messageId);
-      const subject = msg?.subject ?? "";
-      const fromAddr = msg?.from?.emailAddress?.address ?? "";
-
-      let bodyText = "";
-      const raw = String(msg?.body?.content ?? "");
-      if ((msg?.body?.contentType || "").toLowerCase() === "html") {
-        bodyText = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      } else {
-        bodyText = raw || String(msg?.bodyPreview ?? "");
+      const messageId: string | undefined = n.resourceData?.id;
+      if (!messageId) {
+        console.log('No message ID found');
+        continue;
       }
 
-      console.log(`Processing email from: ${fromAddr}, subject: ${subject}`);
+      // Fetch the full message - EXACT same pattern as draft.ts
+      const msg = await getMessage(token.accessToken, messageId);
+      if (!msg) {
+        console.log('Failed to fetch message from Graph API');
+        continue;
+      }
 
-      // Get client config - use first available client
-      const { data: client } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('active', true)
-        .order('created_at', { ascending: true })
-        .limit(1)
+      console.log('Fetched message, extracting content...');
+
+      // Extract subject and a plain-text body we can feed to the model
+      const subject: string = msg?.subject ?? '';
+      const fromAddr: string = msg?.from?.emailAddress?.address ?? '';
+      let bodyText = '';
+      if (msg?.body?.content) {
+        const raw = String(msg.body.content);
+        if (msg.body.contentType === 'html') {
+          bodyText = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); // strip HTML tags
+        } else {
+          bodyText = raw;
+        }
+      }
+      if (!bodyText) bodyText = String(msg?.bodyPreview ?? '');
+
+      console.log('Message details:', {
+        subject,
+        from: msg?.from?.emailAddress?.address,
+        bodyLength: bodyText.length
+      });
+
+      // Get client configuration - EXACT same pattern as draft.ts
+      const { data: user } = await supabase
+        .from('users')
+        .select(`
+          id,
+          upn,
+          client_id,
+          clients (*)
+        `)
+        .eq('id', subscription.user_id)
         .single();
 
-      if (!client) {
-        console.log('No client found');
+      if (!user?.clients) {
+        console.log('No client found for user');
         continue;
       }
 
-      // Generate AI response - EXACT same pattern as your draft.ts
+      const client = user.clients as any;
+      console.log('Found client:', client.name);
+
+      // Get templates for this client - EXACT same pattern as draft.ts
+      const { data: templates } = await supabase
+        .from('templates')
+        .select('*')
+        .eq('client_id', client.id)
+        .eq('active', true)
+        .order('created_at', { ascending: true });
+
+      const template = templates?.[0]?.body_md || '';
+      console.log('Using template:', !!template);
+
+      // Check if this looks like a meeting request
+      const looksLikeMeetingRequest = /\b(meeting|call|schedule|available|time|when|calendar)\b/i.test(subject + ' ' + bodyText);
+      
+      let meetingTimes: string[] = [];
+      if (looksLikeMeetingRequest) {
+        console.log('Detected meeting request, finding available times...');
+        try {
+          const now = new Date();
+          const inWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+          
+          meetingTimes = await findMeetingTimes(token.accessToken, {
+            attendee: msg?.from?.emailAddress?.address || '',
+            tz: client.timezone || 'UTC',
+            windowStartISO: now.toISOString(),
+            windowEndISO: inWeek.toISOString(),
+            durationISO: 'PT30M',
+            maxCandidates: 3
+          });
+          console.log(`Found ${meetingTimes.length} available meeting times`);
+        } catch (error) {
+          console.warn('Failed to get meeting times:', error);
+        }
+      }
+
+      console.log('Generating AI response...');
+
+      // Draft the reply - EXACT same pattern as draft.ts
       const ai = await draftReply({
         originalPlain: bodyText,
         subject,
-        tone: client?.tone?.voice ?? "neutral",
-        companyName: client?.name ?? "",
-        template: "",
-        instructions: client?.policies ?? "",
+        tone: client.tone?.voice || 'professional',
+        companyName: client.name,
+        template: template,
+        instructions: client.policies || undefined,
       });
 
-      let html = ai.bodyHtml || "<p>Thanks for your email.</p>";
+      let html: string = ai?.bodyHtml ?? '<p>Thanks for your email.</p>';
 
-      // Add signature if available
+      // Add meeting times if available
+      if (meetingTimes.length > 0) {
+        const timesList = meetingTimes
+          .map(time => `<li>${time}</li>`)
+          .join('');
+        html += `<p>Here are some times that work for us:</p><ul>${timesList}</ul>`;
+      }
+
+      // Add signature if configured
       if (client.signature) {
         html += `<br/><br/>${client.signature}`;
       }
 
-      console.log('✅ Generated AI response');
+      console.log('Creating draft reply...');
 
-      // Create draft - EXACT same pattern as your draft.ts
+      // Create a reply draft and patch the body (leave as Draft) - EXACT same pattern as draft.ts
       const draft = await createReplyDraft(token.accessToken, messageId, false);
       await updateDraftBody(token.accessToken, draft.id, html);
 
-      console.log(`✅ Draft created: ${draft.id}`);
+      console.log('Draft created successfully:', draft.id);
 
-      // Record usage
-      const tokens = ai.tokens ?? { prompt: 0, completion: 0, total: 0 };
-      await supabase.from('usage_events').insert({
-        client_id: client?.id,
+      // Record usage - EXACT same pattern as draft.ts
+      const tokens = ai?.tokens || { prompt: 0, completion: 0, total: 0 };
+      const estimatedCost = tokens.total * 0.000002;
+
+      const { error: usageError } = await supabase.from('usage_events').insert({
+        client_id: client.id,
         user_id: user.id,
         mailbox_upn: user.upn,
         event_type: 'webhook',
         message_id: messageId,
         draft_id: draft.id,
         subject,
-        meta: { from: fromAddr },
+        meta: {
+          from: msg?.from?.emailAddress?.address || '',
+          meetingTimesFound: meetingTimes.length,
+          templateUsed: !!template
+        },
         tokens_prompt: tokens.prompt,
         tokens_completion: tokens.completion,
-        cost_usd: 0,
+        cost_usd: estimatedCost,
         status: 'completed'
       });
 
-      console.log('✅ Usage recorded');
+      if (usageError) {
+        console.error('Failed to record usage:', usageError);
+      } else {
+        console.log('Usage recorded successfully');
+      }
     }
-  } catch (error: any) {
-    console.error('❌ Webhook error:', error.message);
+  } catch (e) {
+    console.error('webhook error', e);
   }
 }
