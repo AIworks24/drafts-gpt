@@ -1,3 +1,4 @@
+// apps/web/pages/api/graph/subscribe.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from '@/lib/session';
 import { supabaseServer as supabase } from '@/lib/supabase-server';
@@ -15,17 +16,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(401).json({ error: 'Not signed in' });
     }
 
-    console.log('Processing subscription request for user:', sess.userId);
+    console.log('=== SUBSCRIPTION REQUEST ===');
+    console.log('User ID:', sess.userId);
 
     // Get user's MSAL token cache
-    const { data: cacheRow } = await supabase
+    const { data: cacheRow, error: cacheError } = await supabase
       .from('msal_token_cache')
       .select('cache_json')
       .eq('user_id', sess.userId)
       .single();
 
-    if (!cacheRow) {
-      console.log('No token cache found for user');
+    if (cacheError || !cacheRow) {
+      console.log('❌ No token cache found:', cacheError?.message);
       return res.status(401).json({ error: 'No token cache for user. Please sign in again.' });
     }
 
@@ -36,70 +38,58 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const account = accounts[0];
     
     if (!account) {
-      console.log('No account found in cache');
       return res.status(401).json({ error: 'No account in cache. Please sign in again.' });
     }
-
-    console.log('Getting access token for account:', account.username);
 
     // Get access token
     const tokenResult = await msalApp.acquireTokenSilent({ 
       account, 
       scopes: MS_SCOPES 
     }).catch(error => {
-      console.error('Token acquisition failed:', error);
+      console.error('❌ Token acquisition failed:', error);
       return null;
     });
 
     if (!tokenResult?.accessToken) {
-      console.log('Failed to acquire access token');
       return res.status(401).json({ error: 'Failed to acquire access token. Please sign in again.' });
     }
 
-    // BULLETPROOF SUBSCRIPTION MANAGEMENT
-    console.log('Cleaning up existing subscriptions...');
+    console.log('✅ Access token acquired');
 
-    // Get all existing subscriptions for this user
+    // Clean up existing subscriptions
     const { data: existingSubs } = await supabase
       .from('graph_subscriptions')
-      .select('id, expires_at, active')
+      .select('id')
       .eq('user_id', sess.userId);
 
-    // Deactivate all existing subscriptions in our database
     if (existingSubs && existingSubs.length > 0) {
-      console.log(`Found ${existingSubs.length} existing subscriptions, deactivating...`);
+      console.log(`Deactivating ${existingSubs.length} existing subscriptions...`);
       
-      const { error: deactivateError } = await supabase
+      await supabase
         .from('graph_subscriptions')
         .update({ active: false })
         .eq('user_id', sess.userId);
-      
-      if (deactivateError) {
-        console.error('Failed to deactivate existing subscriptions:', deactivateError);
-      }
 
-      // Try to delete the old subscriptions from Microsoft Graph
+      // Try to delete old subscriptions from Microsoft Graph
       for (const oldSub of existingSubs) {
         try {
           await axios.delete(
             `https://graph.microsoft.com/v1.0/subscriptions/${oldSub.id}`,
-            { 
-              headers: { 'Authorization': `Bearer ${tokenResult.accessToken}` },
-              timeout: 5000
-            }
+            { headers: { 'Authorization': `Bearer ${tokenResult.accessToken}` } }
           );
-          console.log(`Deleted old Graph subscription: ${oldSub.id}`);
-        } catch (deleteError) {
-          // Don't fail the whole process if we can't delete old subscriptions
-          console.warn(`Failed to delete old Graph subscription ${oldSub.id}:`, deleteError.response?.status);
+          console.log(`✅ Deleted old subscription: ${oldSub.id}`);
+        } catch (deleteError: any) {
+          console.log(`⚠️ Failed to delete subscription ${oldSub.id}:`, deleteError.response?.status);
         }
       }
     }
 
-    // Create new Graph subscription
-    const webhookUrl = `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`;
-    const expirationTime = new Date(Date.now() + 4230 * 60 * 1000); // ~3 days (max allowed)
+    // Create new Graph subscription pointing to your Edge Function
+    const webhookUrl = `${process.env.SUPABASE_URL}/functions/v1/worker-run`;
+    const expirationTime = new Date(Date.now() + 4230 * 60 * 1000); // ~3 days
     const clientState = `dgpt-${sess.userId}-${Date.now()}`;
+
+    console.log('Creating subscription with webhook URL:', webhookUrl);
 
     const subscriptionData = {
       changeType: 'created',
@@ -109,13 +99,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       clientState: clientState,
     };
 
-    console.log('Creating new Graph subscription with data:', {
-      webhookUrl,
-      expirationTime: expirationTime.toISOString(),
-      clientState,
-      resource: '/me/messages'
-    });
-
     const response = await axios.post(
       'https://graph.microsoft.com/v1.0/subscriptions',
       subscriptionData,
@@ -123,19 +106,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         headers: { 
           'Authorization': `Bearer ${tokenResult.accessToken}`,
           'Content-Type': 'application/json'
-        },
-        timeout: 15000
+        }
       }
     );
 
-    console.log('Graph subscription created successfully:', response.data.id);
-
-    if (!response.data?.id) {
-      throw new Error('Invalid response from Microsoft Graph API - no subscription ID');
-    }
+    console.log('✅ Graph subscription created:', response.data.id);
 
     // Save new subscription to database
-    const { error: insertError } = await supabase
+    const { data: savedSubscription, error: insertError } = await supabase
       .from('graph_subscriptions')
       .insert({
         id: response.data.id,
@@ -143,91 +121,51 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         client_state: clientState,
         expires_at: response.data.expirationDateTime,
         active: true
-      });
+      })
+      .select()
+      .single();
 
     if (insertError) {
-      console.error('Failed to save subscription to database:', insertError);
+      console.error('❌ Failed to save subscription:', insertError);
       
-      // Try to delete the subscription from Graph since we couldn't save it
+      // Clean up Graph subscription
       try {
         await axios.delete(
           `https://graph.microsoft.com/v1.0/subscriptions/${response.data.id}`,
           { headers: { 'Authorization': `Bearer ${tokenResult.accessToken}` } }
         );
-        console.log('Cleaned up Graph subscription after database error');
       } catch (deleteError) {
-        console.error('Failed to cleanup Graph subscription:', deleteError);
+        console.error('❌ Failed to cleanup subscription:', deleteError);
       }
       
       return res.status(500).json({ error: 'Failed to save subscription to database' });
     }
 
-    console.log('Subscription saved to database successfully');
-
-    // Verify the subscription is working by checking if we can find it
-    const { data: verifySubscription } = await supabase
-      .from('graph_subscriptions')
-      .select('*')
-      .eq('id', response.data.id)
-      .single();
-
-    if (!verifySubscription) {
-      console.error('Subscription verification failed - not found in database');
-      return res.status(500).json({ error: 'Subscription created but verification failed' });
-    }
-
-    console.log('Subscription verified successfully');
+    console.log('✅ Subscription saved to database');
 
     return res.status(200).json({ 
       success: true, 
-      message: 'Successfully subscribed to mailbox notifications',
+      message: 'Successfully subscribed to mailbox notifications using Edge Function',
       subscription: {
         id: response.data.id,
         expiresAt: response.data.expirationDateTime,
-        resource: response.data.resource,
-        notificationUrl: response.data.notificationUrl,
+        webhookUrl: webhookUrl,
         clientState: clientState
-      },
-      cleanedUp: existingSubs?.length || 0
+      }
     });
 
   } catch (error: any) {
-    console.error('Webhook subscription error:', {
-      message: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      config: {
-        url: error.config?.url,
-        method: error.config?.method
-      }
-    });
+    console.error('❌ SUBSCRIPTION ERROR:', error.message);
     
-    // Provide specific error messages based on response
     if (error.response?.status === 400) {
-      const errorDetails = error.response.data?.error;
       return res.status(400).json({ 
-        error: `Microsoft Graph rejected the subscription: ${errorDetails?.message || 'Bad Request'}`,
-        details: errorDetails,
-        webhookUrl: `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`
+        error: `Microsoft Graph rejected the subscription: ${error.response.data?.error?.message || 'Bad Request'}`,
+        webhookUrl: `${process.env.SUPABASE_URL}/functions/v1/worker-run`
       });
     }
     
-    if (error.response?.status === 403) {
-      return res.status(403).json({ 
-        error: 'Insufficient permissions. Your app needs Mail.Read permissions in Azure.' 
-      });
-    }
-    
-    if (error.response?.status === 401) {
-      return res.status(401).json({ 
-        error: 'Authentication failed. Please sign out and sign in again.' 
-      });
-    }
-
     return res.status(500).json({ 
-      error: error.response?.data?.error?.message || error.message || 'Failed to create webhook subscription',
-      webhookUrl: `${process.env.WEBHOOK_BASE_URL}/api/graph/webhook`
+      error: error.message || 'Failed to create webhook subscription'
     });
   }
 }

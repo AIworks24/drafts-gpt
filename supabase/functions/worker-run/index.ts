@@ -1,5 +1,5 @@
 // supabase/functions/worker-run/index.ts
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 
 type RunPayload = { messageId?: string };
 
@@ -46,7 +46,7 @@ async function graphUpdateDraftBody(accessToken: string, draftId: string, html: 
 }
 
 async function processSingleMessage(messageId: string) {
-  // MVP: use the first stored mailbox token. (We’ll map subscription→user later.)
+  // MVP: use the first stored mailbox token. (We'll map subscription→user later.)
   const { data: users, error } = await supabase.from("m365_users").select("*").limit(1);
   if (error) throw error;
   const token = users?.[0]?.access_token_encrypted;
