@@ -28,6 +28,38 @@ async function generateHtmlReply(prompt: string) {
   return data?.choices?.[0]?.message?.content ?? "<p>Thanks for reaching out. We'll follow up shortly.</p>";
 }
 
+async function getAccessToken() {
+  // Get the first user
+  const { data: users } = await supabase.from("users").select("*").limit(1);
+  if (!users?.length) throw new Error("No users found");
+
+  // Get their token cache
+  const { data: tokenCache } = await supabase
+    .from("msal_token_cache")
+    .select("cache_json")
+    .eq("user_id", users[0].id)
+    .single();
+
+  if (!tokenCache) throw new Error("No token cache found");
+
+  const cacheData = tokenCache.cache_json;
+  
+  if (cacheData?.AccessToken) {
+    const tokens = Object.values(cacheData.AccessToken);
+    const validToken = tokens.find((token: any) => 
+      token?.secret && 
+      token?.expires_on && 
+      parseInt(token.expires_on) * 1000 > Date.now()
+    );
+    
+    if (validToken) {
+      return (validToken as any).secret;
+    }
+  }
+  
+  throw new Error("No valid access token found");
+}
+
 async function graphCreateReplyDraft(accessToken: string, messageId: string) {
   const url = `${GRAPH_BASE}/me/messages/${encodeURIComponent(messageId)}/createReply`;
   const resp = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
@@ -46,33 +78,73 @@ async function graphUpdateDraftBody(accessToken: string, draftId: string, html: 
 }
 
 async function processSingleMessage(messageId: string) {
-  // MVP: use the first stored mailbox token. (We'll map subscription→user later.)
-  const { data: users, error } = await supabase.from("m365_users").select("*").limit(1);
-  if (error) throw error;
-  const token = users?.[0]?.access_token_encrypted;
-  if (!token) return { processed: 0, note: "No stored mailbox token. Authorize first." };
+  console.log(`Processing message: ${messageId}`);
+  
+  try {
+    console.log("Getting access token...");
+    const accessToken = await getAccessToken();
+    console.log("✅ Access token obtained");
 
-  const html = await generateHtmlReply("Draft a short, polite acknowledgment reply and promise a follow-up.");
-  const draft = await graphCreateReplyDraft(token, messageId);
-  await graphUpdateDraftBody(token, draft.id, html);
+    console.log("Generating AI reply...");
+    const html = await generateHtmlReply("Draft a short, polite acknowledgment reply and promise a follow-up.");
+    console.log("✅ AI reply generated");
+    
+    console.log("Creating reply draft...");
+    const draft = await graphCreateReplyDraft(accessToken, messageId);
+    console.log(`✅ Draft created with ID: ${draft.id}`);
+    
+    console.log("Updating draft body...");
+    await graphUpdateDraftBody(accessToken, draft.id, html);
+    console.log("✅ Draft body updated");
+    
+    console.log("Saving to database...");
+    await supabase.from("drafts").upsert({ 
+      message_id: messageId, 
+      draft_id: draft.id, 
+      status: "completed" 
+    });
+    console.log("✅ Saved to database");
 
-  await supabase.from("drafts").upsert({ message_id: messageId, draft_id: draft.id, status: "completed" });
-  return { processed: 1, draftId: draft.id };
+    return { processed: 1, draftId: draft.id };
+  } catch (error: any) {
+    console.error("❌ Error processing message:", error.message);
+    throw error;
+  }
 }
 
 Deno.serve(async (req) => {
   try {
+    console.log("=== EDGE FUNCTION CALLED ===");
+    console.log("Method:", req.method);
+    
     if (EDGE_FUNCTION_SECRET) {
       const headerSecret = req.headers.get("x-edge-secret") || "";
-      if (headerSecret !== EDGE_FUNCTION_SECRET) return new Response("forbidden", { status: 403 });
+      if (headerSecret !== EDGE_FUNCTION_SECRET) {
+        console.log("❌ Invalid secret");
+        return new Response("forbidden", { status: 403 });
+      }
     }
+    
     const payload = (await req.json().catch(() => ({}))) as RunPayload;
+    console.log("Payload:", JSON.stringify(payload, null, 2));
+    
     if (payload?.messageId) {
       const result = await processSingleMessage(payload.messageId);
-      return new Response(JSON.stringify({ ok: true, ...result }), { headers: { "Content-Type": "application/json" } });
+      console.log("✅ Processing complete:", result);
+      return new Response(JSON.stringify({ ok: true, ...result }), { 
+        headers: { "Content-Type": "application/json" } 
+      });
     }
-    return new Response(JSON.stringify({ ok: true, processed: 0, note: "No messageId provided" }), { headers: { "Content-Type": "application/json" } });
-  } catch (e) {
-    return new Response(JSON.stringify({ ok: false, error: String(e) }), { headers: { "Content-Type": "application/json" }, status: 500 });
+    
+    console.log("❌ No messageId provided");
+    return new Response(JSON.stringify({ ok: true, processed: 0, note: "No messageId provided" }), { 
+      headers: { "Content-Type": "application/json" } 
+    });
+  } catch (e: any) {
+    console.error("❌ Edge function error:", e.message);
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { 
+      headers: { "Content-Type": "application/json" }, 
+      status: 500 
+    });
   }
 });
